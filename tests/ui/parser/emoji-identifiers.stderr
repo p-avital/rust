@@ -6,16 +6,9 @@ LL |     let _ = i_like_to_😄_a_lot() ➖ 4;
    |
 help: Unicode character '➖' (Heavy Minus Sign) looks like '-' (Minus/Hyphen), but it is not
    |
-LL |     let _ = i_like_to_😄_a_lot() - 4;
-   |                                  ~
-
-error: Ferris cannot be used as an identifier
-  --> $DIR/emoji-identifiers.rs:17:9
+LL -     let _ = i_like_to_😄_a_lot() ➖ 4;
+LL +     let _ = i_like_to_😄_a_lot() - 4;
    |
-LL |     let 🦀 = 1;
-   |         ^^ help: try using their name instead: `ferris`
-LL |     dbg!(🦀);
-   |          ^^
 
 error: identifiers cannot contain emoji: `ABig👩👩👧👧Family`
   --> $DIR/emoji-identifiers.rs:1:8
@@ -64,6 +57,14 @@ error: identifiers cannot contain emoji: `i_like_to_😄_a_lot`
 LL |     let _ = i_like_to_😄_a_lot() ➖ 4;
    |             ^^^^^^^^^^^^^^^^^^
 
+error: Ferris cannot be used as an identifier
+  --> $DIR/emoji-identifiers.rs:17:9
+   |
+LL |     let 🦀 = 1;
+   |         ^^ help: try using their name instead: `ferris`
+LL |     dbg!(🦀);
+   |          ^^
+
 error[E0599]: no function or associated item named `full_of✨` found for struct `👀` in the current scope
   --> $DIR/emoji-identifiers.rs:9:8
    |
@@ -71,10 +72,18 @@ LL | struct 👀;
    | --------- function or associated item `full_of✨` not found for this struct
 ...
 LL |     👀::full_of✨()
-   |         ^^^^^^^^^
-   |         |
-   |         function or associated item not found in `👀`
-   |         help: there is an associated function with a similar name: `full_of_✨`
+   |         ^^^^^^^^^ function or associated item not found in `👀`
+   |
+note: if you're trying to build a new `👀`, consider using `👀::full_of_✨` which returns `👀`
+  --> $DIR/emoji-identifiers.rs:4:5
+   |
+LL |     fn full_of_✨() -> 👀 {
+   |     ^^^^^^^^^^^^^^^^^^^^^
+help: there is an associated function `full_of_✨` with a similar name
+   |
+LL -     👀::full_of✨()
+LL +     👀::full_of_✨()
+   |
 
 error[E0425]: cannot find function `i_like_to_😄_a_lot` in this scope
   --> $DIR/emoji-identifiers.rs:13:13

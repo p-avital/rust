@@ -16,12 +16,22 @@ where
     #[inline]
     pub fn swizzle_dyn(self, idxs: Simd<u8, N>) -> Self {
         #![allow(unused_imports, unused_unsafe)]
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(
+            any(target_arch = "aarch64", target_arch = "arm64ec"),
+            target_endian = "little"
+        ))]
         use core::arch::aarch64::{uint8x8_t, vqtbl1q_u8, vtbl1_u8};
-        #[cfg(all(target_arch = "arm", target_feature = "v7", target_feature = "neon"))]
+        #[cfg(all(
+            target_arch = "arm",
+            target_feature = "v7",
+            target_feature = "neon",
+            target_endian = "little"
+        ))]
         use core::arch::arm::{uint8x8_t, vtbl1_u8};
         #[cfg(target_arch = "wasm32")]
         use core::arch::wasm32 as wasm;
+        #[cfg(target_arch = "wasm64")]
+        use core::arch::wasm64 as wasm;
         #[cfg(target_arch = "x86")]
         use core::arch::x86;
         #[cfg(target_arch = "x86_64")]
@@ -29,23 +39,60 @@ where
         // SAFETY: Intrinsics covered by cfg
         unsafe {
             match N {
-                #[cfg(target_feature = "neon")]
+                #[cfg(all(
+                    any(
+                        target_arch = "aarch64",
+                        target_arch = "arm64ec",
+                        all(target_arch = "arm", target_feature = "v7")
+                    ),
+                    target_feature = "neon",
+                    target_endian = "little"
+                ))]
                 8 => transize(vtbl1_u8, self, idxs),
                 #[cfg(target_feature = "ssse3")]
-                16 => transize(x86::_mm_shuffle_epi8, self, idxs),
+                16 => transize(x86::_mm_shuffle_epi8, self, zeroing_idxs(idxs)),
                 #[cfg(target_feature = "simd128")]
                 16 => transize(wasm::i8x16_swizzle, self, idxs),
-                #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+                #[cfg(all(
+                    any(target_arch = "aarch64", target_arch = "arm64ec"),
+                    target_feature = "neon",
+                    target_endian = "little"
+                ))]
                 16 => transize(vqtbl1q_u8, self, idxs),
+                #[cfg(all(
+                    target_arch = "arm",
+                    target_feature = "v7",
+                    target_feature = "neon",
+                    target_endian = "little"
+                ))]
+                16 => transize(armv7_neon_swizzle_u8x16, self, idxs),
                 #[cfg(all(target_feature = "avx2", not(target_feature = "avx512vbmi")))]
-                32 => transize_raw(avx2_pshufb, self, idxs),
-                #[cfg(target_feature = "avx512vl,avx512vbmi")]
-                32 => transize(x86::_mm256_permutexvar_epi8, self, idxs),
-                // Notable absence: avx512bw shuffle
-                // If avx512bw is available, odds of avx512vbmi are good
-                // FIXME: initial AVX512VBMI variant didn't actually pass muster
-                // #[cfg(target_feature = "avx512vbmi")]
-                // 64 => transize(x86::_mm512_permutexvar_epi8, self, idxs),
+                32 => transize(avx2_pshufb, self, idxs),
+                #[cfg(all(target_feature = "avx512vl", target_feature = "avx512vbmi"))]
+                32 => {
+                    // Unlike vpshufb, vpermb doesn't zero out values in the result based on the index high bit
+                    let swizzler = |bytes, idxs| {
+                        let mask = x86::_mm256_cmp_epu8_mask::<{ x86::_MM_CMPINT_LT }>(
+                            idxs,
+                            Simd::<u8, 32>::splat(N as u8).into(),
+                        );
+                        x86::_mm256_maskz_permutexvar_epi8(mask, idxs, bytes)
+                    };
+                    transize(swizzler, self, idxs)
+                }
+                // Notable absence: avx512bw pshufb shuffle
+                #[cfg(all(target_feature = "avx512vl", target_feature = "avx512vbmi"))]
+                64 => {
+                    // Unlike vpshufb, vpermb doesn't zero out values in the result based on the index high bit
+                    let swizzler = |bytes, idxs| {
+                        let mask = x86::_mm512_cmp_epu8_mask::<{ x86::_MM_CMPINT_LT }>(
+                            idxs,
+                            Simd::<u8, 64>::splat(N as u8).into(),
+                        );
+                        x86::_mm512_maskz_permutexvar_epi8(mask, idxs, bytes)
+                    };
+                    transize(swizzler, self, idxs)
+                }
                 _ => {
                     let mut array = [0; N];
                     for (i, k) in idxs.to_array().into_iter().enumerate() {
@@ -60,6 +107,28 @@ where
     }
 }
 
+/// armv7 neon supports swizzling `u8x16` by swizzling two u8x8 blocks
+/// with a u8x8x2 lookup table.
+///
+/// # Safety
+/// This requires armv7 neon to work
+#[cfg(all(
+    target_arch = "arm",
+    target_feature = "v7",
+    target_feature = "neon",
+    target_endian = "little"
+))]
+unsafe fn armv7_neon_swizzle_u8x16(bytes: Simd<u8, 16>, idxs: Simd<u8, 16>) -> Simd<u8, 16> {
+    use core::arch::arm::{uint8x8x2_t, vcombine_u8, vget_high_u8, vget_low_u8, vtbl2_u8};
+    // SAFETY: Caller promised arm neon support
+    unsafe {
+        let bytes = uint8x8x2_t(vget_low_u8(bytes.into()), vget_high_u8(bytes.into()));
+        let lo = vtbl2_u8(bytes, vget_low_u8(idxs.into()));
+        let hi = vtbl2_u8(bytes, vget_high_u8(idxs.into()));
+        vcombine_u8(lo, hi).into()
+    }
+}
+
 /// "vpshufb like it was meant to be" on AVX2
 ///
 /// # Safety
@@ -70,7 +139,7 @@ where
 #[inline]
 #[allow(clippy::let_and_return)]
 unsafe fn avx2_pshufb(bytes: Simd<u8, 32>, idxs: Simd<u8, 32>) -> Simd<u8, 32> {
-    use crate::simd::SimdPartialOrd;
+    use crate::simd::cmp::SimdPartialOrd;
     #[cfg(target_arch = "x86")]
     use core::arch::x86;
     #[cfg(target_arch = "x86_64")]
@@ -113,45 +182,25 @@ unsafe fn avx2_pshufb(bytes: Simd<u8, 32>, idxs: Simd<u8, 32>) -> Simd<u8, 32> {
 #[inline(always)]
 unsafe fn transize<T, const N: usize>(
     f: unsafe fn(T, T) -> T,
-    bytes: Simd<u8, N>,
-    idxs: Simd<u8, N>,
+    a: Simd<u8, N>,
+    b: Simd<u8, N>,
 ) -> Simd<u8, N>
 where
     LaneCount<N>: SupportedLaneCount,
 {
-    let idxs = zeroing_idxs(idxs);
     // SAFETY: Same obligation to use this function as to use mem::transmute_copy.
-    unsafe { mem::transmute_copy(&f(mem::transmute_copy(&bytes), mem::transmute_copy(&idxs))) }
+    unsafe { mem::transmute_copy(&f(mem::transmute_copy(&a), mem::transmute_copy(&b))) }
 }
 
-/// Make indices that yield 0 for this architecture
+/// Make indices that yield 0 for x86
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[allow(unused)]
 #[inline(always)]
 fn zeroing_idxs<const N: usize>(idxs: Simd<u8, N>) -> Simd<u8, N>
 where
     LaneCount<N>: SupportedLaneCount,
 {
-    // On x86, make sure the top bit is set.
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    let idxs = {
-        use crate::simd::SimdPartialOrd;
-        idxs.simd_lt(Simd::splat(N as u8))
-            .select(idxs, Simd::splat(u8::MAX))
-    };
-    // Simply do nothing on most architectures.
-    idxs
-}
-
-/// As transize but no implicit call to `zeroing_idxs`.
-#[allow(dead_code)]
-#[inline(always)]
-unsafe fn transize_raw<T, const N: usize>(
-    f: unsafe fn(T, T) -> T,
-    bytes: Simd<u8, N>,
-    idxs: Simd<u8, N>,
-) -> Simd<u8, N>
-where
-    LaneCount<N>: SupportedLaneCount,
-{
-    // SAFETY: Same obligation to use this function as to use mem::transmute_copy.
-    unsafe { mem::transmute_copy(&f(mem::transmute_copy(&bytes), mem::transmute_copy(&idxs))) }
+    use crate::simd::cmp::SimdPartialOrd;
+    idxs.simd_lt(Simd::splat(N as u8))
+        .select(idxs, Simd::splat(u8::MAX))
 }

@@ -6,9 +6,10 @@ LL |     let x: typeof(92) = 92;
    |
 help: consider replacing `typeof(...)` with an actual type
    |
-LL |     let x: i32 = 92;
-   |            ~~~
+LL -     let x: typeof(92) = 92;
+LL +     let x: i32 = 92;
+   |
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0516`.

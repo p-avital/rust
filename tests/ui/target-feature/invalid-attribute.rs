@@ -1,16 +1,4 @@
-// ignore-arm
-// ignore-aarch64
-// ignore-wasm
-// ignore-emscripten
-// ignore-mips
-// ignore-mips64
-// ignore-powerpc
-// ignore-powerpc64
-// ignore-riscv64
-// ignore-s390x
-// ignore-sparc
-// ignore-sparc64
-// ignore-loongarch64
+//@ only-x86_64
 
 #![warn(unused_attributes)]
 
@@ -41,12 +29,6 @@ extern "Rust" {}
 unsafe fn foo() {}
 
 #[target_feature(enable = "sse2")]
-//~^ ERROR `#[target_feature(..)]` can only be applied to `unsafe` functions
-//~| NOTE see issue #69098
-fn bar() {}
-//~^ NOTE not an `unsafe` function
-
-#[target_feature(enable = "sse2")]
 //~^ ERROR attribute should be applied to a function
 mod another {}
 //~^ NOTE not a function
@@ -69,7 +51,7 @@ enum Bar {}
 #[target_feature(enable = "sse2")]
 //~^ ERROR attribute should be applied to a function
 union Qux {
-//~^ NOTE not a function
+    //~^ NOTE not a function
     f1: u16,
     f2: u16,
 }
@@ -98,6 +80,8 @@ static A: () = ();
 //~^ ERROR attribute should be applied to a function
 impl Quux for u8 {}
 //~^ NOTE not a function
+//~| NOTE missing `foo` in implementation
+//~| ERROR missing: `foo`
 
 #[target_feature(enable = "sse2")]
 //~^ ERROR attribute should be applied to a function
@@ -105,15 +89,19 @@ impl Foo {}
 //~^ NOTE not a function
 
 trait Quux {
-    fn foo();
+    fn foo(); //~ NOTE `foo` from trait
+    //~^ NOTE: type in trait
 }
 
 impl Quux for Foo {
     #[target_feature(enable = "sse2")]
-    //~^ ERROR `#[target_feature(..)]` can only be applied to `unsafe` functions
-    //~| NOTE see issue #69098
+    //~^ ERROR `#[target_feature(..)]` cannot be applied to safe trait method
+    //~| NOTE cannot be applied to safe trait method
     fn foo() {}
     //~^ NOTE not an `unsafe` function
+    //~| ERROR: incompatible type for trait
+    //~| NOTE: expected safe fn, found unsafe fn
+    //~| NOTE: expected signature `fn()`
 }
 
 fn main() {
@@ -121,9 +109,8 @@ fn main() {
     //~^ ERROR attribute should be applied to a function
     unsafe {
         foo();
-        bar();
     }
-    //~^^^^ NOTE not a function
+    //~^^^ NOTE not a function
 
     #[target_feature(enable = "sse2")]
     //~^ ERROR attribute should be applied to a function

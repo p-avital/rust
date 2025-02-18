@@ -15,7 +15,7 @@ use crate::{
 };
 
 macro_rules! from_id {
-    ($(($id:path, $ty:path)),*) => {$(
+    ($(($id:path, $ty:path)),* $(,)?) => {$(
         impl From<$id> for $ty {
             fn from(id: $id) -> $ty {
                 $ty { id }
@@ -40,13 +40,16 @@ from_id![
     (hir_def::TraitAliasId, crate::TraitAlias),
     (hir_def::StaticId, crate::Static),
     (hir_def::ConstId, crate::Const),
+    (hir_def::InTypeConstId, crate::InTypeConst),
     (hir_def::FunctionId, crate::Function),
     (hir_def::ImplId, crate::Impl),
     (hir_def::TypeOrConstParamId, crate::TypeOrConstParam),
     (hir_def::TypeParamId, crate::TypeParam),
     (hir_def::ConstParamId, crate::ConstParam),
     (hir_def::LifetimeParamId, crate::LifetimeParam),
-    (hir_def::MacroId, crate::Macro)
+    (hir_def::MacroId, crate::Macro),
+    (hir_def::ExternCrateId, crate::ExternCrateDecl),
+    (hir_def::ExternBlockId, crate::ExternBlock),
 ];
 
 impl From<AdtId> for Adt {
@@ -91,13 +94,13 @@ impl From<GenericParam> for GenericParamId {
 
 impl From<EnumVariantId> for Variant {
     fn from(id: EnumVariantId) -> Self {
-        Variant { parent: id.parent.into(), id: id.local_id }
+        Variant { id }
     }
 }
 
 impl From<Variant> for EnumVariantId {
     fn from(def: Variant) -> Self {
-        EnumVariantId { parent: def.parent.id, local_id: def.id }
+        def.id
     }
 }
 
@@ -144,6 +147,7 @@ impl From<DefWithBody> for DefWithBodyId {
             DefWithBody::Static(it) => DefWithBodyId::StaticId(it.id),
             DefWithBody::Const(it) => DefWithBodyId::ConstId(it.id),
             DefWithBody::Variant(it) => DefWithBodyId::VariantId(it.into()),
+            DefWithBody::InTypeConst(it) => DefWithBodyId::InTypeConstId(it.id),
         }
     }
 }
@@ -155,6 +159,7 @@ impl From<DefWithBodyId> for DefWithBody {
             DefWithBodyId::StaticId(it) => DefWithBody::Static(it.into()),
             DefWithBodyId::ConstId(it) => DefWithBody::Const(it.into()),
             DefWithBodyId::VariantId(it) => DefWithBody::Variant(it.into()),
+            DefWithBodyId::InTypeConstId(it) => DefWithBody::InTypeConst(it.into()),
         }
     }
 }
@@ -178,8 +183,8 @@ impl From<GenericDef> for GenericDefId {
             GenericDef::TraitAlias(it) => GenericDefId::TraitAliasId(it.id),
             GenericDef::TypeAlias(it) => GenericDefId::TypeAliasId(it.id),
             GenericDef::Impl(it) => GenericDefId::ImplId(it.id),
-            GenericDef::Variant(it) => GenericDefId::EnumVariantId(it.into()),
             GenericDef::Const(it) => GenericDefId::ConstId(it.id),
+            GenericDef::Static(it) => GenericDefId::StaticId(it.id),
         }
     }
 }
@@ -193,8 +198,8 @@ impl From<GenericDefId> for GenericDef {
             GenericDefId::TraitAliasId(it) => GenericDef::TraitAlias(it.into()),
             GenericDefId::TypeAliasId(it) => GenericDef::TypeAlias(it.into()),
             GenericDefId::ImplId(it) => GenericDef::Impl(it.into()),
-            GenericDefId::EnumVariantId(it) => GenericDef::Variant(it.into()),
             GenericDefId::ConstId(it) => GenericDef::Const(it.into()),
+            GenericDefId::StaticId(it) => GenericDef::Static(it.into()),
         }
     }
 }

@@ -1,11 +1,10 @@
+use rustc_hir::{Expr, ExprKind, HirId, Stmt, StmtKind};
+use rustc_middle::query::Key;
+use rustc_middle::ty::{self, Ty};
+use rustc_session::{declare_lint, declare_lint_pass};
+
 use crate::lints::MappingToUnit;
 use crate::{LateContext, LateLintPass, LintContext};
-
-use rustc_hir::{Expr, ExprKind, HirId, Stmt, StmtKind};
-use rustc_middle::{
-    query::Key,
-    ty::{self, Ty},
-};
 
 declare_lint! {
     /// The `map_unit_fn` lint checks for `Iterator::map` receive
@@ -61,7 +60,7 @@ impl<'tcx> LateLintPass<'tcx> for MapUnitFn {
                         let fn_ty = cx.tcx.fn_sig(id).skip_binder();
                         let ret_ty = fn_ty.output().skip_binder();
                         if is_unit_type(ret_ty) {
-                            cx.emit_spanned_lint(
+                            cx.emit_span_lint(
                                 MAP_UNIT_FN,
                                 span,
                                 MappingToUnit {
@@ -80,7 +79,7 @@ impl<'tcx> LateLintPass<'tcx> for MapUnitFn {
                         let cl_ty = subs.as_closure().sig();
                         let ret_ty = cl_ty.output().skip_binder();
                         if is_unit_type(ret_ty) {
-                            cx.emit_spanned_lint(
+                            cx.emit_span_lint(
                                 MAP_UNIT_FN,
                                 span,
                                 MappingToUnit {

@@ -1,6 +1,6 @@
 use dot::{Id, LabelText};
 use ide_db::{
-    base_db::{CrateGraph, CrateId, Dependency, SourceDatabase, SourceDatabaseExt},
+    base_db::{CrateGraph, CrateId, Dependency, SourceDatabase, SourceRootDatabase},
     FxHashSet, RootDatabase,
 };
 use triomphe::Arc;
@@ -12,11 +12,9 @@ use triomphe::Arc;
 //
 // Only workspace crates are included, no crates.io dependencies or sysroot crates.
 //
-// |===
-// | Editor  | Action Name
-//
-// | VS Code | **rust-analyzer: View Crate Graph**
-// |===
+// | Editor  | Action Name |
+// |---------|-------------|
+// | VS Code | **rust-analyzer: View Crate Graph** |
 pub(crate) fn view_crate_graph(db: &RootDatabase, full: bool) -> Result<String, String> {
     let crate_graph = db.crate_graph();
     let crates_to_render = crate_graph
@@ -86,7 +84,8 @@ impl<'a> dot::Labeller<'a, CrateId, Edge<'a>> for DotCrateGraph {
     }
 
     fn node_label(&'a self, n: &CrateId) -> LabelText<'a> {
-        let name = self.graph[*n].display_name.as_ref().map_or("(unnamed crate)", |name| &*name);
+        let name =
+            self.graph[*n].display_name.as_ref().map_or("(unnamed crate)", |name| name.as_str());
         LabelText::LabelStr(name.into())
     }
 }

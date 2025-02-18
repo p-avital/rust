@@ -6,12 +6,8 @@
 //   unsafe contexts
 // - functions with `#[target_feature]` can coerce to unsafe fn pointers
 
-// check-pass
-// only-x86_64
-// revisions: mir thir
-// [thir]compile-flags: -Z thir-unsafeck
-
-#![feature(target_feature_11)]
+//@ check-pass
+//@ only-x86_64
 
 #[target_feature(enable = "sse2")]
 const fn sse2() {}

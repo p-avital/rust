@@ -1,4 +1,4 @@
-error[E0658]: avr-interrupt and avr-non-blocking-interrupt ABIs are experimental and subject to change
+error[E0658]: the extern "avr-non-blocking-interrupt" ABI is experimental and subject to change
   --> $DIR/feature-gate-abi-avr-interrupt.rs:11:8
    |
 LL | extern "avr-non-blocking-interrupt" fn fu() {}
@@ -6,8 +6,9 @@ LL | extern "avr-non-blocking-interrupt" fn fu() {}
    |
    = note: see issue #69664 <https://github.com/rust-lang/rust/issues/69664> for more information
    = help: add `#![feature(abi_avr_interrupt)]` to the crate attributes to enable
+   = note: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 
-error[E0658]: avr-interrupt and avr-non-blocking-interrupt ABIs are experimental and subject to change
+error[E0658]: the extern "avr-interrupt" ABI is experimental and subject to change
   --> $DIR/feature-gate-abi-avr-interrupt.rs:13:8
    |
 LL | extern "avr-interrupt" fn f() {}
@@ -15,8 +16,9 @@ LL | extern "avr-interrupt" fn f() {}
    |
    = note: see issue #69664 <https://github.com/rust-lang/rust/issues/69664> for more information
    = help: add `#![feature(abi_avr_interrupt)]` to the crate attributes to enable
+   = note: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 
-error[E0658]: avr-interrupt and avr-non-blocking-interrupt ABIs are experimental and subject to change
+error[E0658]: the extern "avr-interrupt" ABI is experimental and subject to change
   --> $DIR/feature-gate-abi-avr-interrupt.rs:17:12
    |
 LL |     extern "avr-interrupt" fn m();
@@ -24,8 +26,9 @@ LL |     extern "avr-interrupt" fn m();
    |
    = note: see issue #69664 <https://github.com/rust-lang/rust/issues/69664> for more information
    = help: add `#![feature(abi_avr_interrupt)]` to the crate attributes to enable
+   = note: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 
-error[E0658]: avr-interrupt and avr-non-blocking-interrupt ABIs are experimental and subject to change
+error[E0658]: the extern "avr-non-blocking-interrupt" ABI is experimental and subject to change
   --> $DIR/feature-gate-abi-avr-interrupt.rs:19:12
    |
 LL |     extern "avr-non-blocking-interrupt" fn mu();
@@ -33,8 +36,9 @@ LL |     extern "avr-non-blocking-interrupt" fn mu();
    |
    = note: see issue #69664 <https://github.com/rust-lang/rust/issues/69664> for more information
    = help: add `#![feature(abi_avr_interrupt)]` to the crate attributes to enable
+   = note: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 
-error[E0658]: avr-interrupt and avr-non-blocking-interrupt ABIs are experimental and subject to change
+error[E0658]: the extern "avr-interrupt" ABI is experimental and subject to change
   --> $DIR/feature-gate-abi-avr-interrupt.rs:22:12
    |
 LL |     extern "avr-interrupt" fn dm() {}
@@ -42,8 +46,9 @@ LL |     extern "avr-interrupt" fn dm() {}
    |
    = note: see issue #69664 <https://github.com/rust-lang/rust/issues/69664> for more information
    = help: add `#![feature(abi_avr_interrupt)]` to the crate attributes to enable
+   = note: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 
-error[E0658]: avr-interrupt and avr-non-blocking-interrupt ABIs are experimental and subject to change
+error[E0658]: the extern "avr-non-blocking-interrupt" ABI is experimental and subject to change
   --> $DIR/feature-gate-abi-avr-interrupt.rs:24:12
    |
 LL |     extern "avr-non-blocking-interrupt" fn dmu() {}
@@ -51,8 +56,9 @@ LL |     extern "avr-non-blocking-interrupt" fn dmu() {}
    |
    = note: see issue #69664 <https://github.com/rust-lang/rust/issues/69664> for more information
    = help: add `#![feature(abi_avr_interrupt)]` to the crate attributes to enable
+   = note: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 
-error[E0658]: avr-interrupt and avr-non-blocking-interrupt ABIs are experimental and subject to change
+error[E0658]: the extern "avr-interrupt" ABI is experimental and subject to change
   --> $DIR/feature-gate-abi-avr-interrupt.rs:30:12
    |
 LL |     extern "avr-interrupt" fn m() {}
@@ -60,8 +66,9 @@ LL |     extern "avr-interrupt" fn m() {}
    |
    = note: see issue #69664 <https://github.com/rust-lang/rust/issues/69664> for more information
    = help: add `#![feature(abi_avr_interrupt)]` to the crate attributes to enable
+   = note: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 
-error[E0658]: avr-interrupt and avr-non-blocking-interrupt ABIs are experimental and subject to change
+error[E0658]: the extern "avr-non-blocking-interrupt" ABI is experimental and subject to change
   --> $DIR/feature-gate-abi-avr-interrupt.rs:32:12
    |
 LL |     extern "avr-non-blocking-interrupt" fn mu() {}
@@ -69,8 +76,9 @@ LL |     extern "avr-non-blocking-interrupt" fn mu() {}
    |
    = note: see issue #69664 <https://github.com/rust-lang/rust/issues/69664> for more information
    = help: add `#![feature(abi_avr_interrupt)]` to the crate attributes to enable
+   = note: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 
-error[E0658]: avr-interrupt and avr-non-blocking-interrupt ABIs are experimental and subject to change
+error[E0658]: the extern "avr-interrupt" ABI is experimental and subject to change
   --> $DIR/feature-gate-abi-avr-interrupt.rs:37:12
    |
 LL |     extern "avr-interrupt" fn im() {}
@@ -78,8 +86,9 @@ LL |     extern "avr-interrupt" fn im() {}
    |
    = note: see issue #69664 <https://github.com/rust-lang/rust/issues/69664> for more information
    = help: add `#![feature(abi_avr_interrupt)]` to the crate attributes to enable
+   = note: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 
-error[E0658]: avr-interrupt and avr-non-blocking-interrupt ABIs are experimental and subject to change
+error[E0658]: the extern "avr-non-blocking-interrupt" ABI is experimental and subject to change
   --> $DIR/feature-gate-abi-avr-interrupt.rs:39:12
    |
 LL |     extern "avr-non-blocking-interrupt" fn imu() {}
@@ -87,8 +96,9 @@ LL |     extern "avr-non-blocking-interrupt" fn imu() {}
    |
    = note: see issue #69664 <https://github.com/rust-lang/rust/issues/69664> for more information
    = help: add `#![feature(abi_avr_interrupt)]` to the crate attributes to enable
+   = note: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 
-error[E0658]: avr-interrupt and avr-non-blocking-interrupt ABIs are experimental and subject to change
+error[E0658]: the extern "avr-interrupt" ABI is experimental and subject to change
   --> $DIR/feature-gate-abi-avr-interrupt.rs:43:18
    |
 LL | type TA = extern "avr-interrupt" fn();
@@ -96,8 +106,9 @@ LL | type TA = extern "avr-interrupt" fn();
    |
    = note: see issue #69664 <https://github.com/rust-lang/rust/issues/69664> for more information
    = help: add `#![feature(abi_avr_interrupt)]` to the crate attributes to enable
+   = note: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 
-error[E0658]: avr-interrupt and avr-non-blocking-interrupt ABIs are experimental and subject to change
+error[E0658]: the extern "avr-non-blocking-interrupt" ABI is experimental and subject to change
   --> $DIR/feature-gate-abi-avr-interrupt.rs:45:19
    |
 LL | type TAU = extern "avr-non-blocking-interrupt" fn();
@@ -105,8 +116,9 @@ LL | type TAU = extern "avr-non-blocking-interrupt" fn();
    |
    = note: see issue #69664 <https://github.com/rust-lang/rust/issues/69664> for more information
    = help: add `#![feature(abi_avr_interrupt)]` to the crate attributes to enable
+   = note: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 
-error[E0658]: avr-interrupt and avr-non-blocking-interrupt ABIs are experimental and subject to change
+error[E0658]: the extern "avr-interrupt" ABI is experimental and subject to change
   --> $DIR/feature-gate-abi-avr-interrupt.rs:48:8
    |
 LL | extern "avr-interrupt" {}
@@ -114,8 +126,9 @@ LL | extern "avr-interrupt" {}
    |
    = note: see issue #69664 <https://github.com/rust-lang/rust/issues/69664> for more information
    = help: add `#![feature(abi_avr_interrupt)]` to the crate attributes to enable
+   = note: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 
-error[E0658]: avr-interrupt and avr-non-blocking-interrupt ABIs are experimental and subject to change
+error[E0658]: the extern "avr-non-blocking-interrupt" ABI is experimental and subject to change
   --> $DIR/feature-gate-abi-avr-interrupt.rs:50:8
    |
 LL | extern "avr-non-blocking-interrupt" {}
@@ -123,6 +136,7 @@ LL | extern "avr-non-blocking-interrupt" {}
    |
    = note: see issue #69664 <https://github.com/rust-lang/rust/issues/69664> for more information
    = help: add `#![feature(abi_avr_interrupt)]` to the crate attributes to enable
+   = note: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 
 error: aborting due to 14 previous errors
 

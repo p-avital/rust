@@ -1,6 +1,6 @@
-//@run-rustfix
 #![allow(unused)]
 #![warn(clippy::suspicious_doc_comments)]
+#![allow(clippy::empty_line_after_doc_comments)]
 
 //! Real module documentation.
 ///! Fake module documentation.

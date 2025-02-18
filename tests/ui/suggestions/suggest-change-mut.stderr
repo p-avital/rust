@@ -20,16 +20,13 @@ LL | fn issue_81421<T: Read + Write>(mut stream: T) where &T: std::io::Read {
 help: consider changing this borrow's mutability
    |
 LL |         let mut stream_reader = BufReader::new(&mut stream);
-   |                                                ~~~~
+   |                                                 +++
 
 error[E0599]: the method `read_until` exists for struct `BufReader<&T>`, but its trait bounds were not satisfied
   --> $DIR/suggest-change-mut.rs:16:23
    |
 LL |         stream_reader.read_until(b'\n', &mut buffer).expect("Reading into buffer failed");
    |                       ^^^^^^^^^^ method cannot be called on `BufReader<&T>` due to unsatisfied trait bounds
-  --> $SRC_DIR/std/src/io/buffered/bufreader.rs:LL:COL
-   |
-   = note: doesn't satisfy `BufReader<&T>: BufRead`
    |
    = note: the following trait bounds were not satisfied:
            `&T: std::io::Read`

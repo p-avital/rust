@@ -11,12 +11,13 @@ LL | macro_rules! macro_one { () => ("one") }
    |
 help: a macro with a similar name exists
    |
-LL |     macro_one!();
-   |     ~~~~~~~~~
+LL -     macro_two!();
+LL +     macro_one!();
+   |
 help: consider importing this macro
    |
 LL + use two_macros::macro_two;
    |
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 

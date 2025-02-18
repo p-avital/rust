@@ -4,6 +4,9 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
+// No formatting: this file is nothing but re-exports, and their order is worth preserving.
+#![cfg_attr(rustfmt, rustfmt::skip)]
+
 // Re-exported core operators
 #[stable(feature = "rust1", since = "1.0.0")]
 #[doc(no_inline)]
@@ -11,11 +14,17 @@ pub use crate::marker::{Send, Sized, Sync, Unpin};
 #[stable(feature = "rust1", since = "1.0.0")]
 #[doc(no_inline)]
 pub use crate::ops::{Drop, Fn, FnMut, FnOnce};
+#[stable(feature = "async_closure", since = "1.85.0")]
+#[doc(no_inline)]
+pub use crate::ops::{AsyncFn, AsyncFnMut, AsyncFnOnce};
 
 // Re-exported functions
 #[stable(feature = "rust1", since = "1.0.0")]
 #[doc(no_inline)]
 pub use crate::mem::drop;
+#[stable(feature = "size_of_prelude", since = "1.80.0")]
+#[doc(no_inline)]
+pub use crate::mem::{align_of, align_of_val, size_of, size_of_val};
 
 // Re-exported types and traits
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -52,11 +61,6 @@ pub use core::prelude::v1::{
 #[doc(no_inline)]
 pub use core::prelude::v1::concat_bytes;
 
-// Do not `doc(inline)` these `doc(hidden)` items.
-#[stable(feature = "builtin_macro_prelude", since = "1.38.0")]
-#[allow(deprecated)]
-pub use core::prelude::v1::{RustcDecodable, RustcEncodable};
-
 // Do not `doc(no_inline)` so that they become doc items on their own
 // (no public module for them to be re-exported from).
 #[stable(feature = "builtin_macro_prelude", since = "1.38.0")]
@@ -90,6 +94,14 @@ pub use core::prelude::v1::cfg_eval;
     reason = "placeholder syntax for type ascription"
 )]
 pub use core::prelude::v1::type_ascribe;
+
+// Do not `doc(no_inline)` either.
+#[unstable(
+    feature = "deref_patterns",
+    issue = "87121",
+    reason = "placeholder syntax for deref patterns"
+)]
+pub use core::prelude::v1::deref;
 
 // The file so far is equivalent to core/src/prelude/v1.rs. It is duplicated
 // rather than glob imported because we want docs to show these re-exports as

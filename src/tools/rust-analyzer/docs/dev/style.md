@@ -99,14 +99,7 @@ Including a description and GIF suitable for the changelog means less work for t
 
 ## Clippy
 
-We don't enforce Clippy.
-A number of default lints have high false positive rate.
-Selectively patching false-positives with `allow(clippy)` is probably worse than entirely disabling a problematic lint.
-There's a `cargo lint` command which runs a subset of low-FPR lints.
-Careful tweaking of `lint` is welcome.
-Of course, applying Clippy suggestions is welcome as long as they indeed improve the code.
-
-**Rationale:** see [rust-lang/clippy#5537](https://github.com/rust-lang/rust-clippy/issues/5537).
+We use Clippy to improve the code, but if some lints annoy you, allow them in the [Cargo.toml](../../Cargo.toml) [workspace.lints.clippy] section.
 
 # Code
 
@@ -869,6 +862,19 @@ type   -> ty
 
 **Rationale:** consistency.
 
+## Error Handling Trivia
+
+Use `anyhow::Result` rather than just `Result`.
+
+**Rationale:** makes it immediately clear what result that is.
+
+Use `anyhow::format_err!` rather than `anyhow::anyhow`.
+
+**Rationale:** consistent, boring, avoids stuttering.
+
+There's no specific guidance on the formatting of error messages, see [anyhow/#209](https://github.com/dtolnay/anyhow/issues/209).
+Do not end error and context messages with `.` though.
+
 ## Early Returns
 
 Do use early returns
@@ -1166,7 +1172,7 @@ MergeBehavior::Last => {
 **Rationale:** writing a sentence (or maybe even a paragraph) rather just "a comment" creates a more appropriate frame of mind.
 It tricks you into writing down more of the context you keep in your head while coding.
 
-For `.md` and `.adoc` files, prefer a sentence-per-line format, don't wrap lines.
+For `.md` files prefer a sentence-per-line format, don't wrap lines.
 If the line is too long, you want to split the sentence in two :-)
 
 **Rationale:** much easier to edit the text and read the diff, see [this link](https://asciidoctor.org/docs/asciidoc-recommended-practices/#one-sentence-per-line).

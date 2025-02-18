@@ -6,9 +6,10 @@ LL | use single_err::something;
    |
 help: consider importing this module instead
    |
-LL | use glob_ok::something;
-   |     ~~~~~~~~~~~~~~~~~~
+LL - use single_err::something;
+LL + use glob_ok::something;
+   |
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0432`.

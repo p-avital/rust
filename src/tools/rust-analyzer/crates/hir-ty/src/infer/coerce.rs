@@ -22,10 +22,9 @@ use crate::{
         Adjust, Adjustment, AutoBorrow, InferOk, InferenceContext, OverloadedDeref, PointerCast,
         TypeError, TypeMismatch,
     },
-    static_lifetime,
     utils::ClosureSubst,
-    Canonical, DomainGoal, FnPointer, FnSig, Guidance, InEnvironment, Interner, Solution,
-    Substitution, TraitEnvironment, Ty, TyBuilder, TyExt,
+    Canonical, DomainGoal, FnAbi, FnPointer, FnSig, Guidance, InEnvironment, Interner, Lifetime,
+    Solution, Substitution, TraitEnvironment, Ty, TyBuilder, TyExt,
 };
 
 use super::unify::InferenceTable;
@@ -126,7 +125,11 @@ impl CoerceMany {
         // pointers to have a chance at getting a match. See
         // https://github.com/rust-lang/rust/blob/7b805396bf46dce972692a6846ce2ad8481c5f85/src/librustc_typeck/check/coercion.rs#L877-L916
         let sig = match (self.merged_ty().kind(Interner), expr_ty.kind(Interner)) {
-            (TyKind::FnDef(x, _), TyKind::FnDef(y, _)) if x == y => None,
+            (TyKind::FnDef(x, _), TyKind::FnDef(y, _))
+                if x == y && ctx.table.unify(&self.merged_ty(), &expr_ty) =>
+            {
+                None
+            }
             (TyKind::Closure(x, _), TyKind::Closure(y, _)) if x == y => None,
             (TyKind::FnDef(..) | TyKind::Closure(..), TyKind::FnDef(..) | TyKind::Closure(..)) => {
                 // FIXME: we're ignoring safety here. To be more correct, if we have one FnDef and one Closure,
@@ -140,8 +143,8 @@ impl CoerceMany {
         };
         if let Some(sig) = sig {
             let target_ty = TyKind::Function(sig.to_fn_ptr()).intern(Interner);
-            let result1 = ctx.table.coerce_inner(self.merged_ty(), &target_ty);
-            let result2 = ctx.table.coerce_inner(expr_ty.clone(), &target_ty);
+            let result1 = ctx.table.coerce_inner(self.merged_ty(), &target_ty, CoerceNever::Yes);
+            let result2 = ctx.table.coerce_inner(expr_ty.clone(), &target_ty, CoerceNever::Yes);
             if let (Ok(result1), Ok(result2)) = (result1, result2) {
                 ctx.table.register_infer_ok(InferOk { value: (), goals: result1.goals });
                 for &e in &self.expressions {
@@ -160,10 +163,27 @@ impl CoerceMany {
         // type is a type variable and the new one is `!`, trying it the other
         // way around first would mean we make the type variable `!`, instead of
         // just marking it as possibly diverging.
-        if let Ok(res) = ctx.coerce(expr, &expr_ty, &self.merged_ty()) {
+        //
+        // - [Comment from rustc](https://github.com/rust-lang/rust/blob/5ff18d0eaefd1bd9ab8ec33dab2404a44e7631ed/compiler/rustc_hir_typeck/src/coercion.rs#L1334-L1335)
+        // First try to coerce the new expression to the type of the previous ones,
+        // but only if the new expression has no coercion already applied to it.
+        if expr.is_none_or(|expr| !ctx.result.expr_adjustments.contains_key(&expr)) {
+            if let Ok(res) = ctx.coerce(expr, &expr_ty, &self.merged_ty(), CoerceNever::Yes) {
+                self.final_ty = Some(res);
+                if let Some(expr) = expr {
+                    self.expressions.push(expr);
+                }
+                return;
+            }
+        }
+
+        if let Ok((adjustments, res)) =
+            ctx.coerce_inner(&self.merged_ty(), &expr_ty, CoerceNever::Yes)
+        {
             self.final_ty = Some(res);
-        } else if let Ok(res) = ctx.coerce(expr, &self.merged_ty(), &expr_ty) {
-            self.final_ty = Some(res);
+            for &e in &self.expressions {
+                ctx.write_expr_adj(e, adjustments.clone());
+            }
         } else {
             match cause {
                 CoercionCause::Expr(id) => {
@@ -198,7 +218,7 @@ pub(crate) fn coerce(
     let vars = table.fresh_subst(tys.binders.as_slice(Interner));
     let ty1_with_vars = vars.apply(tys.value.0.clone(), Interner);
     let ty2_with_vars = vars.apply(tys.value.1.clone(), Interner);
-    let (adjustments, ty) = table.coerce(&ty1_with_vars, &ty2_with_vars)?;
+    let (adjustments, ty) = table.coerce(&ty1_with_vars, &ty2_with_vars, CoerceNever::Yes)?;
     // default any type vars that weren't unified back to their original bound vars
     // (kind of hacky)
     let find_var = |iv| {
@@ -220,7 +240,13 @@ pub(crate) fn coerce(
     Ok((adjustments, table.resolve_with_fallback(ty, &fallback)))
 }
 
-impl<'a> InferenceContext<'a> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoerceNever {
+    Yes,
+    No,
+}
+
+impl InferenceContext<'_> {
     /// Unify two types, but may coerce the first one to the second one
     /// using "implicit coercion rules" if needed.
     pub(super) fn coerce(
@@ -228,28 +254,44 @@ impl<'a> InferenceContext<'a> {
         expr: Option<ExprId>,
         from_ty: &Ty,
         to_ty: &Ty,
+        // [Comment from rustc](https://github.com/rust-lang/rust/blob/4cc494bbfe9911d24f3ee521f98d5c6bb7e3ffe8/compiler/rustc_hir_typeck/src/coercion.rs#L85-L89)
+        // Whether we allow `NeverToAny` coercions. This is unsound if we're
+        // coercing a place expression without it counting as a read in the MIR.
+        // This is a side-effect of HIR not really having a great distinction
+        // between places and values.
+        coerce_never: CoerceNever,
     ) -> Result<Ty, TypeError> {
-        let from_ty = self.resolve_ty_shallow(from_ty);
-        let to_ty = self.resolve_ty_shallow(to_ty);
-        let (adjustments, ty) = self.table.coerce(&from_ty, &to_ty)?;
+        let (adjustments, ty) = self.coerce_inner(from_ty, to_ty, coerce_never)?;
         if let Some(expr) = expr {
             self.write_expr_adj(expr, adjustments);
         }
         Ok(ty)
     }
+
+    fn coerce_inner(
+        &mut self,
+        from_ty: &Ty,
+        to_ty: &Ty,
+        coerce_never: CoerceNever,
+    ) -> Result<(Vec<Adjustment>, Ty), TypeError> {
+        let from_ty = self.resolve_ty_shallow(from_ty);
+        let to_ty = self.resolve_ty_shallow(to_ty);
+        self.table.coerce(&from_ty, &to_ty, coerce_never)
+    }
 }
 
-impl<'a> InferenceTable<'a> {
+impl InferenceTable<'_> {
     /// Unify two types, but may coerce the first one to the second one
     /// using "implicit coercion rules" if needed.
     pub(crate) fn coerce(
         &mut self,
         from_ty: &Ty,
         to_ty: &Ty,
+        coerce_never: CoerceNever,
     ) -> Result<(Vec<Adjustment>, Ty), TypeError> {
         let from_ty = self.resolve_ty_shallow(from_ty);
         let to_ty = self.resolve_ty_shallow(to_ty);
-        match self.coerce_inner(from_ty, &to_ty) {
+        match self.coerce_inner(from_ty, &to_ty, coerce_never) {
             Ok(InferOk { value: (adjustments, ty), goals }) => {
                 self.register_infer_ok(InferOk { value: (), goals });
                 Ok((adjustments, ty))
@@ -261,19 +303,40 @@ impl<'a> InferenceTable<'a> {
         }
     }
 
-    fn coerce_inner(&mut self, from_ty: Ty, to_ty: &Ty) -> CoerceResult {
+    fn coerce_inner(&mut self, from_ty: Ty, to_ty: &Ty, coerce_never: CoerceNever) -> CoerceResult {
         if from_ty.is_never() {
-            // Subtle: If we are coercing from `!` to `?T`, where `?T` is an unbound
-            // type variable, we want `?T` to fallback to `!` if not
-            // otherwise constrained. An example where this arises:
-            //
-            //     let _: Option<?T> = Some({ return; });
-            //
-            // here, we would coerce from `!` to `?T`.
             if let TyKind::InferenceVar(tv, TyVariableKind::General) = to_ty.kind(Interner) {
                 self.set_diverging(*tv, true);
             }
-            return success(simple(Adjust::NeverToAny)(to_ty.clone()), to_ty.clone(), vec![]);
+            if coerce_never == CoerceNever::Yes {
+                // Subtle: If we are coercing from `!` to `?T`, where `?T` is an unbound
+                // type variable, we want `?T` to fallback to `!` if not
+                // otherwise constrained. An example where this arises:
+                //
+                //     let _: Option<?T> = Some({ return; });
+                //
+                // here, we would coerce from `!` to `?T`.
+                return success(simple(Adjust::NeverToAny)(to_ty.clone()), to_ty.clone(), vec![]);
+            } else {
+                return self.unify_and(&from_ty, to_ty, identity);
+            }
+        }
+
+        // If we are coercing into a TAIT, coerce into its proxy inference var, instead.
+        let mut to_ty = to_ty;
+        let _to;
+        if let Some(tait_table) = &self.tait_coercion_table {
+            if let TyKind::OpaqueType(opaque_ty_id, _) = to_ty.kind(Interner) {
+                if !matches!(
+                    from_ty.kind(Interner),
+                    TyKind::InferenceVar(..) | TyKind::OpaqueType(..)
+                ) {
+                    if let Some(ty) = tait_table.get(opaque_ty_id) {
+                        _to = ty.clone();
+                        to_ty = &_to;
+                    }
+                }
+            }
         }
 
         // Consider coercing the subtype to a DST
@@ -284,7 +347,7 @@ impl<'a> InferenceTable<'a> {
         // Examine the supertype and consider auto-borrowing.
         match to_ty.kind(Interner) {
             TyKind::Raw(mt, _) => return self.coerce_ptr(from_ty, to_ty, *mt),
-            TyKind::Ref(mt, _, _) => return self.coerce_ref(from_ty, to_ty, *mt),
+            TyKind::Ref(mt, lt, _) => return self.coerce_ref(from_ty, to_ty, *mt, lt),
             _ => {}
         }
 
@@ -336,7 +399,7 @@ impl<'a> InferenceTable<'a> {
         // Check that the types which they point at are compatible.
         let from_raw = TyKind::Raw(to_mt, from_inner.clone()).intern(Interner);
 
-        // Although references and unsafe ptrs have the same
+        // Although references and raw ptrs have the same
         // representation, we still register an Adjust::DerefRef so that
         // regionck knows that the region for `a` must be valid here.
         if is_ref {
@@ -360,11 +423,17 @@ impl<'a> InferenceTable<'a> {
     /// Reborrows `&mut A` to `&mut B` and `&(mut) A` to `&B`.
     /// To match `A` with `B`, autoderef will be performed,
     /// calling `deref`/`deref_mut` where necessary.
-    fn coerce_ref(&mut self, from_ty: Ty, to_ty: &Ty, to_mt: Mutability) -> CoerceResult {
-        let from_mt = match from_ty.kind(Interner) {
-            &TyKind::Ref(mt, _, _) => {
-                coerce_mutabilities(mt, to_mt)?;
-                mt
+    fn coerce_ref(
+        &mut self,
+        from_ty: Ty,
+        to_ty: &Ty,
+        to_mt: Mutability,
+        to_lt: &Lifetime,
+    ) -> CoerceResult {
+        let (_from_lt, from_mt) = match from_ty.kind(Interner) {
+            TyKind::Ref(mt, lt, _) => {
+                coerce_mutabilities(*mt, to_mt)?;
+                (lt.clone(), *mt) // clone is probably not good?
             }
             _ => return self.unify_and(&from_ty, to_ty, identity),
         };
@@ -377,7 +446,7 @@ impl<'a> InferenceTable<'a> {
 
         let snapshot = self.snapshot();
 
-        let mut autoderef = Autoderef::new(self, from_ty.clone());
+        let mut autoderef = Autoderef::new(self, from_ty.clone(), false, false);
         let mut first_error = None;
         let mut found = None;
 
@@ -410,8 +479,8 @@ impl<'a> InferenceTable<'a> {
             // compare those. Note that this means we use the target
             // mutability [1], since it may be that we are coercing
             // from `&mut T` to `&U`.
-            let lt = static_lifetime(); // FIXME: handle lifetimes correctly, see rustc
-            let derefd_from_ty = TyKind::Ref(to_mt, lt, referent_ty).intern(Interner);
+            let lt = to_lt; // FIXME: Involve rustc LUB and SUB flag checks
+            let derefd_from_ty = TyKind::Ref(to_mt, lt.clone(), referent_ty).intern(Interner);
             match autoderef.table.try_unify(&derefd_from_ty, to_ty) {
                 Ok(result) => {
                     found = Some(result.map(|()| derefd_from_ty));
@@ -455,8 +524,10 @@ impl<'a> InferenceTable<'a> {
         }
 
         let mut adjustments = auto_deref_adjust_steps(&autoderef);
-        adjustments
-            .push(Adjustment { kind: Adjust::Borrow(AutoBorrow::Ref(to_mt)), target: ty.clone() });
+        adjustments.push(Adjustment {
+            kind: Adjust::Borrow(AutoBorrow::Ref(to_lt.clone(), to_mt)),
+            target: ty.clone(),
+        });
 
         success(adjustments, ty, goals)
     }
@@ -604,11 +675,11 @@ impl<'a> InferenceTable<'a> {
             (TyKind::Ref(from_mt, _, from_inner), &TyKind::Ref(to_mt, _, _)) => {
                 coerce_mutabilities(*from_mt, to_mt)?;
 
-                let lt = static_lifetime();
+                let lt = self.new_lifetime_var();
                 Some((
                     Adjustment { kind: Adjust::Deref(None), target: from_inner.clone() },
                     Adjustment {
-                        kind: Adjust::Borrow(AutoBorrow::Ref(to_mt)),
+                        kind: Adjust::Borrow(AutoBorrow::Ref(lt.clone(), to_mt)),
                         target: TyKind::Ref(to_mt, lt, from_inner.clone()).intern(Interner),
                     },
                 ))
@@ -647,7 +718,7 @@ impl<'a> InferenceTable<'a> {
         let goal: InEnvironment<DomainGoal> =
             InEnvironment::new(&self.trait_env.env, coerce_unsized_tref.cast(Interner));
 
-        let canonicalized = self.canonicalize(goal);
+        let canonicalized = self.canonicalize_with_free_vars(goal);
 
         // FIXME: rustc's coerce_unsized is more specialized -- it only tries to
         // solve `CoerceUnsized` and `Unsize` goals at this point and leaves the
@@ -691,7 +762,7 @@ fn coerce_closure_fn_ty(closure_substs: &Substitution, safety: chalk_ir::Safety)
     match closure_sig.kind(Interner) {
         TyKind::Function(fn_ty) => TyKind::Function(FnPointer {
             num_binders: fn_ty.num_binders,
-            sig: FnSig { safety, ..fn_ty.sig },
+            sig: FnSig { safety, abi: FnAbi::Rust, variadic: fn_ty.sig.variadic },
             substitution: fn_ty.substitution.clone(),
         })
         .intern(Interner),

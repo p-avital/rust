@@ -19,8 +19,9 @@ LL |     0_u32
    |
 help: change the type of the numeric literal from `u32` to `i32`
    |
-LL |     0_i32
-   |       ~~~
+LL -     0_u32
+LL +     0_i32
+   |
 
 error[E0277]: cannot add `impl Foo` to `u32`
   --> $DIR/equality.rs:24:11
@@ -30,10 +31,10 @@ LL |         n + sum_to(n - 1)
    |
    = help: the trait `Add<impl Foo>` is not implemented for `u32`
    = help: the following other types implement trait `Add<Rhs>`:
-             <&'a u32 as Add<u32>>
-             <&u32 as Add<&u32>>
-             <u32 as Add<&u32>>
-             <u32 as Add>
+             `&u32` implements `Add<u32>`
+             `&u32` implements `Add`
+             `u32` implements `Add<&u32>`
+             `u32` implements `Add`
 
 error: aborting due to 2 previous errors; 1 warning emitted
 

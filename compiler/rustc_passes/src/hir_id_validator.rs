@@ -1,38 +1,26 @@
 use rustc_data_structures::sync::Lock;
 use rustc_hir as hir;
 use rustc_hir::def_id::LocalDefId;
-use rustc_hir::intravisit;
-use rustc_hir::{HirId, ItemLocalId};
+use rustc_hir::{HirId, ItemLocalId, intravisit};
 use rustc_index::bit_set::GrowableBitSet;
 use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::TyCtxt;
 
 pub fn check_crate(tcx: TyCtxt<'_>) {
-    if tcx.sess.opts.unstable_opts.hir_stats {
-        crate::hir_stats::print_hir_stats(tcx);
-    }
+    let errors = Lock::new(Vec::new());
 
-    #[cfg(debug_assertions)]
-    {
-        let errors = Lock::new(Vec::new());
+    tcx.par_hir_for_each_module(|module_id| {
+        let mut v =
+            HirIdValidator { tcx, owner: None, hir_ids_seen: Default::default(), errors: &errors };
 
-        tcx.hir().par_for_each_module(|module_id| {
-            let mut v = HirIdValidator {
-                tcx,
-                owner: None,
-                hir_ids_seen: Default::default(),
-                errors: &errors,
-            };
+        tcx.hir_visit_item_likes_in_module(module_id, &mut v);
+    });
 
-            tcx.hir().visit_item_likes_in_module(module_id, &mut v);
-        });
+    let errors = errors.into_inner();
 
-        let errors = errors.into_inner();
-
-        if !errors.is_empty() {
-            let message = errors.iter().fold(String::new(), |s1, s2| s1 + "\n" + s2);
-            tcx.sess.delay_span_bug(rustc_span::DUMMY_SP, message);
-        }
+    if !errors.is_empty() {
+        let message = errors.iter().fold(String::new(), |s1, s2| s1 + "\n" + s2);
+        tcx.dcx().delayed_bug(message);
     }
 }
 
@@ -73,7 +61,7 @@ impl<'a, 'hir> HirIdValidator<'a, 'hir> {
 
         if max != self.hir_ids_seen.len() - 1 {
             let hir = self.tcx.hir();
-            let pretty_owner = hir.def_path(owner.def_id).to_string_no_crate_verbose();
+            let pretty_owner = self.tcx.hir_def_path(owner.def_id).to_string_no_crate_verbose();
 
             let missing_items: Vec<_> = (0..=max as u32)
                 .map(|i| ItemLocalId::from_u32(i))
@@ -89,9 +77,8 @@ impl<'a, 'hir> HirIdValidator<'a, 'hir> {
 
             self.error(|| {
                 format!(
-                    "ItemLocalIds not assigned densely in {}. \
-                Max ItemLocalId = {}, missing IDs = {:#?}; seen IDs = {:#?}",
-                    pretty_owner, max, missing_items, seen_items
+                    "ItemLocalIds not assigned densely in {pretty_owner}. \
+            Max ItemLocalId = {max}, missing IDs = {missing_items:#?}; seen IDs = {seen_items:#?}"
                 )
             });
         }
@@ -118,8 +105,8 @@ impl<'a, 'hir> HirIdValidator<'a, 'hir> {
 impl<'a, 'hir> intravisit::Visitor<'hir> for HirIdValidator<'a, 'hir> {
     type NestedFilter = nested_filter::OnlyBodies;
 
-    fn nested_visit_map(&mut self) -> Self::Map {
-        self.tcx.hir()
+    fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+        self.tcx
     }
 
     fn visit_nested_item(&mut self, id: hir::ItemId) {
@@ -151,8 +138,8 @@ impl<'a, 'hir> intravisit::Visitor<'hir> for HirIdValidator<'a, 'hir> {
                 format!(
                     "HirIdValidator: The recorded owner of {} is {} instead of {}",
                     self.tcx.hir().node_to_string(hir_id),
-                    self.tcx.hir().def_path(hir_id.owner.def_id).to_string_no_crate_verbose(),
-                    self.tcx.hir().def_path(owner.def_id).to_string_no_crate_verbose()
+                    self.tcx.hir_def_path(hir_id.owner.def_id).to_string_no_crate_verbose(),
+                    self.tcx.hir_def_path(owner.def_id).to_string_no_crate_verbose()
                 )
             });
         }
@@ -173,5 +160,9 @@ impl<'a, 'hir> intravisit::Visitor<'hir> for HirIdValidator<'a, 'hir> {
     fn visit_impl_item(&mut self, i: &'hir hir::ImplItem<'hir>) {
         let mut inner_visitor = self.new_visitor(self.tcx);
         inner_visitor.check(i.owner_id, |this| intravisit::walk_impl_item(this, i));
+    }
+
+    fn visit_pattern_type_pattern(&mut self, p: &'hir hir::TyPat<'hir>) {
+        intravisit::walk_ty_pat(self, p)
     }
 }

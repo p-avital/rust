@@ -8,9 +8,10 @@ LL |     let _n = m.iter().map(|_, b| {
    |
 help: change the closure to accept a tuple instead of individual arguments
    |
-LL |     let _n = m.iter().map(|(_, b)| {
-   |                           ~~~~~~~~
+LL -     let _n = m.iter().map(|_, b| {
+LL +     let _n = m.iter().map(|(_, b)| {
+   |
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0593`.

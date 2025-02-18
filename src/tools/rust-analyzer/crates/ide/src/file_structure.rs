@@ -19,6 +19,7 @@ pub struct StructureNode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum StructureNodeKind {
     SymbolKind(SymbolKind),
+    ExternBlock,
     Region,
 }
 
@@ -30,14 +31,11 @@ pub enum StructureNodeKind {
 // * draw breadcrumbs to describe the context around the cursor
 // * draw outline of the file
 //
-// |===
-// | Editor  | Shortcut
+// | Editor  | Shortcut |
+// |---------|----------|
+// | VS Code | <kbd>Ctrl+Shift+O</kbd> |
 //
-// | VS Code | kbd:[Ctrl+Shift+O]
-// |===
-//
-// image::https://user-images.githubusercontent.com/48062697/113020654-b42fc800-917a-11eb-8388-e7dc4d92b02e.gif[]
-
+// ![File Structure](https://user-images.githubusercontent.com/48062697/113020654-b42fc800-917a-11eb-8388-e7dc4d92b02e.gif)
 pub(crate) fn file_structure(file: &SourceFile) -> Vec<StructureNode> {
     let mut res = Vec::new();
     let mut stack = Vec::new();
@@ -134,15 +132,22 @@ fn structure_node(node: &SyntaxNode) -> Option<StructureNode> {
                 if let Some(type_param_list) = it.generic_param_list() {
                     collapse_ws(type_param_list.syntax(), &mut detail);
                 }
-                if let Some(param_list) = it.param_list() {
+                let has_self_param = if let Some(param_list) = it.param_list() {
                     collapse_ws(param_list.syntax(), &mut detail);
-                }
+                    param_list.self_param().is_some()
+                } else {
+                    false
+                };
                 if let Some(ret_type) = it.ret_type() {
                     detail.push(' ');
                     collapse_ws(ret_type.syntax(), &mut detail);
                 }
 
-                decl_with_detail(&it, Some(detail), StructureNodeKind::SymbolKind(SymbolKind::Function))
+                decl_with_detail(&it, Some(detail), StructureNodeKind::SymbolKind(if has_self_param {
+                    SymbolKind::Method
+                } else {
+                    SymbolKind::Function
+                }))
             },
             ast::Struct(it) => decl(it, StructureNodeKind::SymbolKind(SymbolKind::Struct)),
             ast::Union(it) => decl(it, StructureNodeKind::SymbolKind(SymbolKind::Union)),
@@ -151,6 +156,7 @@ fn structure_node(node: &SyntaxNode) -> Option<StructureNode> {
             ast::Trait(it) => decl(it, StructureNodeKind::SymbolKind(SymbolKind::Trait)),
             ast::TraitAlias(it) => decl(it, StructureNodeKind::SymbolKind(SymbolKind::TraitAlias)),
             ast::Module(it) => decl(it, StructureNodeKind::SymbolKind(SymbolKind::Module)),
+            ast::Macro(it) => decl(it, StructureNodeKind::SymbolKind(SymbolKind::Macro)),
             ast::TypeAlias(it) => decl_with_type_ref(&it, it.ty(), StructureNodeKind::SymbolKind(SymbolKind::TypeAlias)),
             ast::RecordField(it) => decl_with_type_ref(&it, it.ty(), StructureNodeKind::SymbolKind(SymbolKind::Field)),
             ast::Const(it) => decl_with_type_ref(&it, it.ty(), StructureNodeKind::SymbolKind(SymbolKind::Const)),
@@ -180,7 +186,41 @@ fn structure_node(node: &SyntaxNode) -> Option<StructureNode> {
                 };
                 Some(node)
             },
-            ast::Macro(it) => decl(it, StructureNodeKind::SymbolKind(SymbolKind::Macro)),
+            ast::LetStmt(it) => {
+                let pat = it.pat()?;
+
+                let mut label = String::new();
+                collapse_ws(pat.syntax(), &mut label);
+
+                let node = StructureNode {
+                    parent: None,
+                    label,
+                    navigation_range: pat.syntax().text_range(),
+                    node_range: it.syntax().text_range(),
+                    kind: StructureNodeKind::SymbolKind(SymbolKind::Local),
+                    detail: it.ty().map(|ty| ty.to_string()),
+                    deprecated: false,
+                };
+
+                Some(node)
+            },
+            ast::ExternBlock(it) => {
+                let mut label = "extern".to_owned();
+                let abi = it.abi()?;
+                if let Some(abi) = abi.string_token() {
+                    label.push(' ');
+                    label.push_str(abi.text());
+                }
+                Some(StructureNode {
+                    parent: None,
+                    label,
+                    navigation_range: abi.syntax().text_range(),
+                    node_range: it.syntax().text_range(),
+                    kind: StructureNodeKind::ExternBlock,
+                    detail: None,
+                    deprecated: false,
+                })
+            },
             _ => None,
         }
     }
@@ -190,10 +230,12 @@ fn structure_token(token: SyntaxToken) -> Option<StructureNode> {
     if let Some(comment) = ast::Comment::cast(token) {
         let text = comment.text().trim();
 
-        if let Some(region_name) = text.strip_prefix("// region:").map(str::trim) {
+        if let Some(region_name) =
+            text.strip_prefix("// region:").map(str::trim).filter(|it| !it.is_empty())
+        {
             return Some(StructureNode {
                 parent: None,
-                label: region_name.to_string(),
+                label: region_name.to_owned(),
                 navigation_range: comment.syntax().text_range(),
                 node_range: comment.syntax().text_range(),
                 kind: StructureNodeKind::Region,
@@ -212,8 +254,8 @@ mod tests {
 
     use super::*;
 
-    fn check(ra_fixture: &str, expect: Expect) {
-        let file = SourceFile::parse(ra_fixture).ok().unwrap();
+    fn check(#[rust_analyzer::rust_fixture] ra_fixture: &str, expect: Expect) {
+        let file = SourceFile::parse(ra_fixture, span::Edition::CURRENT).ok().unwrap();
         let structure = file_structure(&file);
         expect.assert_debug_eq(&structure)
     }
@@ -298,6 +340,19 @@ mod m {
 fn f() {}
 // endregion
 fn g() {}
+}
+
+extern "C" {}
+
+fn let_statements() {
+    let x = 42;
+    let mut y = x;
+    let Foo {
+        ..
+    } = Foo { x };
+    if let None = Some(x) {}
+    _ = ();
+    let _ = g();
 }
 "#,
             expect![[r#"
@@ -622,6 +677,80 @@ fn g() {}
                         detail: Some(
                             "fn()",
                         ),
+                        deprecated: false,
+                    },
+                    StructureNode {
+                        parent: None,
+                        label: "extern \"C\"",
+                        navigation_range: 638..648,
+                        node_range: 638..651,
+                        kind: ExternBlock,
+                        detail: None,
+                        deprecated: false,
+                    },
+                    StructureNode {
+                        parent: None,
+                        label: "let_statements",
+                        navigation_range: 656..670,
+                        node_range: 653..813,
+                        kind: SymbolKind(
+                            Function,
+                        ),
+                        detail: Some(
+                            "fn()",
+                        ),
+                        deprecated: false,
+                    },
+                    StructureNode {
+                        parent: Some(
+                            27,
+                        ),
+                        label: "x",
+                        navigation_range: 683..684,
+                        node_range: 679..690,
+                        kind: SymbolKind(
+                            Local,
+                        ),
+                        detail: None,
+                        deprecated: false,
+                    },
+                    StructureNode {
+                        parent: Some(
+                            27,
+                        ),
+                        label: "mut y",
+                        navigation_range: 699..704,
+                        node_range: 695..709,
+                        kind: SymbolKind(
+                            Local,
+                        ),
+                        detail: None,
+                        deprecated: false,
+                    },
+                    StructureNode {
+                        parent: Some(
+                            27,
+                        ),
+                        label: "Foo { .. }",
+                        navigation_range: 718..740,
+                        node_range: 714..753,
+                        kind: SymbolKind(
+                            Local,
+                        ),
+                        detail: None,
+                        deprecated: false,
+                    },
+                    StructureNode {
+                        parent: Some(
+                            27,
+                        ),
+                        label: "_",
+                        navigation_range: 803..804,
+                        node_range: 799..811,
+                        kind: SymbolKind(
+                            Local,
+                        ),
+                        detail: None,
                         deprecated: false,
                     },
                 ]

@@ -1,6 +1,4 @@
-// only-x86_64
-
-#![feature(target_feature_11)]
+//@ only-x86_64
 
 #[target_feature(enable = "avx2")]
 fn main() {}

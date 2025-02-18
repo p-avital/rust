@@ -1,11 +1,126 @@
 //! Precedence representation.
 
 use crate::{
-    ast::{self, BinaryOp, Expr, HasArgList},
+    ast::{self, BinaryOp, Expr, HasArgList, RangeItem},
     match_ast, AstNode, SyntaxNode,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub enum ExprPrecedence {
+    // return, break, yield, closures
+    Jump,
+    // = += -= *= /= %= &= |= ^= <<= >>=
+    Assign,
+    // .. ..=
+    Range,
+    // ||
+    LOr,
+    // &&
+    LAnd,
+    // == != < > <= >=
+    Compare,
+    // |
+    BitOr,
+    // ^
+    BitXor,
+    // &
+    BitAnd,
+    // << >>
+    Shift,
+    // + -
+    Sum,
+    // * / %
+    Product,
+    // as
+    Cast,
+    // unary - * ! & &mut
+    Prefix,
+    // paths, loops, function calls, array indexing, field expressions, method calls
+    Unambiguous,
+}
+
+#[derive(PartialEq, Debug)]
+pub enum Fixity {
+    /// The operator is left-associative
+    Left,
+    /// The operator is right-associative
+    Right,
+    /// The operator is not associative
+    None,
+}
+
+pub fn precedence(expr: &ast::Expr) -> ExprPrecedence {
+    match expr {
+        Expr::ClosureExpr(closure) => match closure.ret_type() {
+            None => ExprPrecedence::Jump,
+            Some(_) => ExprPrecedence::Unambiguous,
+        },
+
+        Expr::BreakExpr(_)
+        | Expr::ContinueExpr(_)
+        | Expr::ReturnExpr(_)
+        | Expr::YeetExpr(_)
+        | Expr::YieldExpr(_) => ExprPrecedence::Jump,
+
+        Expr::RangeExpr(..) => ExprPrecedence::Range,
+
+        Expr::BinExpr(bin_expr) => match bin_expr.op_kind() {
+            Some(it) => match it {
+                BinaryOp::LogicOp(logic_op) => match logic_op {
+                    ast::LogicOp::And => ExprPrecedence::LAnd,
+                    ast::LogicOp::Or => ExprPrecedence::LOr,
+                },
+                BinaryOp::ArithOp(arith_op) => match arith_op {
+                    ast::ArithOp::Add | ast::ArithOp::Sub => ExprPrecedence::Sum,
+                    ast::ArithOp::Div | ast::ArithOp::Rem | ast::ArithOp::Mul => {
+                        ExprPrecedence::Product
+                    }
+                    ast::ArithOp::Shl | ast::ArithOp::Shr => ExprPrecedence::Shift,
+                    ast::ArithOp::BitXor => ExprPrecedence::BitXor,
+                    ast::ArithOp::BitOr => ExprPrecedence::BitOr,
+                    ast::ArithOp::BitAnd => ExprPrecedence::BitAnd,
+                },
+                BinaryOp::CmpOp(_) => ExprPrecedence::Compare,
+                BinaryOp::Assignment { .. } => ExprPrecedence::Assign,
+            },
+            None => ExprPrecedence::Unambiguous,
+        },
+        Expr::CastExpr(_) => ExprPrecedence::Cast,
+
+        Expr::LetExpr(_) | Expr::PrefixExpr(_) | Expr::RefExpr(_) => ExprPrecedence::Prefix,
+
+        Expr::ArrayExpr(_)
+        | Expr::AsmExpr(_)
+        | Expr::AwaitExpr(_)
+        | Expr::BecomeExpr(_)
+        | Expr::BlockExpr(_)
+        | Expr::CallExpr(_)
+        | Expr::FieldExpr(_)
+        | Expr::ForExpr(_)
+        | Expr::FormatArgsExpr(_)
+        | Expr::IfExpr(_)
+        | Expr::IndexExpr(_)
+        | Expr::Literal(_)
+        | Expr::LoopExpr(_)
+        | Expr::MacroExpr(_)
+        | Expr::MatchExpr(_)
+        | Expr::MethodCallExpr(_)
+        | Expr::OffsetOfExpr(_)
+        | Expr::ParenExpr(_)
+        | Expr::PathExpr(_)
+        | Expr::RecordExpr(_)
+        | Expr::TryExpr(_)
+        | Expr::TupleExpr(_)
+        | Expr::UnderscoreExpr(_)
+        | Expr::WhileExpr(_) => ExprPrecedence::Unambiguous,
+    }
+}
+
 impl Expr {
+    pub fn precedence(&self) -> ExprPrecedence {
+        precedence(self)
+    }
+
     // Implementation is based on
     // - https://doc.rust-lang.org/reference/expressions.html#expression-precedence
     // - https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html
@@ -27,6 +142,14 @@ impl Expr {
     }
 
     fn needs_parens_in_expr(&self, parent: &Expr) -> bool {
+        // Parentheses are necessary when calling a function-like pointer that is a member of a struct or union
+        // (e.g. `(a.f)()`).
+        let is_parent_call_expr = matches!(parent, ast::Expr::CallExpr(_));
+        let is_field_expr = matches!(self, ast::Expr::FieldExpr(_));
+        if is_parent_call_expr && is_field_expr {
+            return true;
+        }
+
         // Special-case block weirdness
         if parent.child_is_followed_by_a_block() {
             use Expr::*;
@@ -130,7 +253,8 @@ impl Expr {
             //
             ContinueExpr(_) => (0, 0),
 
-            ClosureExpr(_) | ReturnExpr(_) | YieldExpr(_) | YeetExpr(_) | BreakExpr(_) => (0, 1),
+            ClosureExpr(_) | ReturnExpr(_) | BecomeExpr(_) | YieldExpr(_) | YeetExpr(_)
+            | BreakExpr(_) | OffsetOfExpr(_) | FormatArgsExpr(_) | AsmExpr(_) => (0, 1),
 
             RangeExpr(_) => (5, 5),
 
@@ -160,7 +284,7 @@ impl Expr {
 
             CastExpr(_) => (25, 26),
 
-            BoxExpr(_) | RefExpr(_) | LetExpr(_) | PrefixExpr(_) => (0, 27),
+            RefExpr(_) | LetExpr(_) | PrefixExpr(_) => (0, 27),
 
             AwaitExpr(_) | CallExpr(_) | MethodCallExpr(_) | IndexExpr(_) | TryExpr(_)
             | MacroExpr(_) => (29, 0),
@@ -202,7 +326,6 @@ impl Expr {
             let rhs = match self {
                 RefExpr(e) => e.expr(),
                 BinExpr(e) => e.rhs(),
-                BoxExpr(e) => e.expr(),
                 BreakExpr(e) => e.expr(),
                 LetExpr(e) => e.expr(),
                 RangeExpr(e) => e.end(),
@@ -253,7 +376,7 @@ impl Expr {
     }
 
     /// Returns true if self is one of `return`, `break`, `continue` or `yield` with **no associated value**.
-    fn is_ret_like_with_no_value(&self) -> bool {
+    pub fn is_ret_like_with_no_value(&self) -> bool {
         use Expr::*;
 
         match self {
@@ -279,7 +402,6 @@ impl Expr {
                 CastExpr(e) => e.as_token(),
                 FieldExpr(e) => e.dot_token(),
                 AwaitExpr(e) => e.dot_token(),
-                BoxExpr(e) => e.box_token(),
                 BreakExpr(e) => e.break_token(),
                 CallExpr(e) => e.arg_list().and_then(|args| args.l_paren_token()),
                 ClosureExpr(e) => e.param_list().and_then(|params| params.l_paren_token()),
@@ -289,11 +411,14 @@ impl Expr {
                 PrefixExpr(e) => e.op_token(),
                 RefExpr(e) => e.amp_token(),
                 ReturnExpr(e) => e.return_token(),
+                BecomeExpr(e) => e.become_token(),
                 TryExpr(e) => e.question_mark_token(),
                 YieldExpr(e) => e.yield_token(),
                 YeetExpr(e) => e.do_token(),
                 LetExpr(e) => e.let_token(),
-
+                OffsetOfExpr(e) => e.builtin_token(),
+                FormatArgsExpr(e) => e.builtin_token(),
+                AsmExpr(e) => e.builtin_token(),
                 ArrayExpr(_) | TupleExpr(_) | Literal(_) | PathExpr(_) | ParenExpr(_)
                 | IfExpr(_) | WhileExpr(_) | ForExpr(_) | LoopExpr(_) | MatchExpr(_)
                 | BlockExpr(_) | RecordExpr(_) | UnderscoreExpr(_) | MacroExpr(_) => None,
@@ -310,11 +435,12 @@ impl Expr {
             ArrayExpr(_) | AwaitExpr(_) | BlockExpr(_) | CallExpr(_) | CastExpr(_)
             | ClosureExpr(_) | FieldExpr(_) | IndexExpr(_) | Literal(_) | LoopExpr(_)
             | MacroExpr(_) | MethodCallExpr(_) | ParenExpr(_) | PathExpr(_) | RecordExpr(_)
-            | TryExpr(_) | TupleExpr(_) | UnderscoreExpr(_) => false,
+            | TryExpr(_) | TupleExpr(_) | UnderscoreExpr(_) | OffsetOfExpr(_)
+            | FormatArgsExpr(_) | AsmExpr(_) => false,
 
             // For BinExpr and RangeExpr this is technically wrong -- the child can be on the left...
-            BinExpr(_) | RangeExpr(_) | BoxExpr(_) | BreakExpr(_) | ContinueExpr(_)
-            | PrefixExpr(_) | RefExpr(_) | ReturnExpr(_) | YieldExpr(_) | YeetExpr(_)
+            BinExpr(_) | RangeExpr(_) | BreakExpr(_) | ContinueExpr(_) | PrefixExpr(_)
+            | RefExpr(_) | ReturnExpr(_) | BecomeExpr(_) | YieldExpr(_) | YeetExpr(_)
             | LetExpr(_) => self
                 .syntax()
                 .parent()

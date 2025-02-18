@@ -1,28 +1,31 @@
 error: this is an outer doc comment and does not apply to the parent module or crate
-  --> $DIR/suspicious_doc_comments.rs:6:1
+  --> tests/ui/suspicious_doc_comments.rs:6:1
    |
 LL | ///! Fake module documentation.
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: `-D clippy::suspicious-doc-comments` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::suspicious_doc_comments)]`
 help: use an inner doc comment to document the parent module or crate
    |
-LL | //! Fake module documentation.
+LL - ///! Fake module documentation.
+LL + //! Fake module documentation.
    |
 
 error: this is an outer doc comment and does not apply to the parent module or crate
-  --> $DIR/suspicious_doc_comments.rs:10:5
+  --> tests/ui/suspicious_doc_comments.rs:10:5
    |
 LL |     ///! This module contains useful functions.
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
 help: use an inner doc comment to document the parent module or crate
    |
-LL |     //! This module contains useful functions.
+LL -     ///! This module contains useful functions.
+LL +     //! This module contains useful functions.
    |
 
 error: this is an outer doc comment and does not apply to the parent module or crate
-  --> $DIR/suspicious_doc_comments.rs:22:5
+  --> tests/ui/suspicious_doc_comments.rs:22:5
    |
 LL | /     /**! This module contains useful functions.
 LL | |      */
@@ -35,7 +38,7 @@ LL +      */
    |
 
 error: this is an outer doc comment and does not apply to the parent module or crate
-  --> $DIR/suspicious_doc_comments.rs:36:5
+  --> tests/ui/suspicious_doc_comments.rs:36:5
    |
 LL | /     ///! This module
 LL | |     ///! contains
@@ -50,7 +53,7 @@ LL ~     //! useful functions.
    |
 
 error: this is an outer doc comment and does not apply to the parent module or crate
-  --> $DIR/suspicious_doc_comments.rs:44:5
+  --> tests/ui/suspicious_doc_comments.rs:44:5
    |
 LL | /     ///! a
 LL | |     ///! b
@@ -63,18 +66,19 @@ LL ~     //! b
    |
 
 error: this is an outer doc comment and does not apply to the parent module or crate
-  --> $DIR/suspicious_doc_comments.rs:52:5
+  --> tests/ui/suspicious_doc_comments.rs:52:5
    |
 LL |     ///! a
    |     ^^^^^^
    |
 help: use an inner doc comment to document the parent module or crate
    |
-LL |     //! a
+LL -     ///! a
+LL +     //! a
    |
 
 error: this is an outer doc comment and does not apply to the parent module or crate
-  --> $DIR/suspicious_doc_comments.rs:58:5
+  --> tests/ui/suspicious_doc_comments.rs:58:5
    |
 LL | /     ///! a
 LL | |
@@ -84,30 +88,32 @@ LL | |     ///! b
 help: use an inner doc comment to document the parent module or crate
    |
 LL ~     //! a
-LL | 
+LL |
 LL ~     //! b
    |
 
 error: this is an outer doc comment and does not apply to the parent module or crate
-  --> $DIR/suspicious_doc_comments.rs:70:5
+  --> tests/ui/suspicious_doc_comments.rs:70:5
    |
 LL |     ///! Very cool macro
    |     ^^^^^^^^^^^^^^^^^^^^
    |
 help: use an inner doc comment to document the parent module or crate
    |
-LL |     //! Very cool macro
+LL -     ///! Very cool macro
+LL +     //! Very cool macro
    |
 
 error: this is an outer doc comment and does not apply to the parent module or crate
-  --> $DIR/suspicious_doc_comments.rs:77:5
+  --> tests/ui/suspicious_doc_comments.rs:77:5
    |
 LL |     ///! Huh.
    |     ^^^^^^^^^
    |
 help: use an inner doc comment to document the parent module or crate
    |
-LL |     //! Huh.
+LL -     ///! Huh.
+LL +     //! Huh.
    |
 
 error: aborting due to 9 previous errors

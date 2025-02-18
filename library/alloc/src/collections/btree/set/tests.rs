@@ -1,11 +1,9 @@
+use std::ops::Bound::{Excluded, Included};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
 use super::*;
 use crate::testing::crash_test::{CrashTestDummy, Panic};
 use crate::testing::rng::DeterministicRng;
-use crate::vec::Vec;
-use std::cmp::Ordering;
-use std::hash::{Hash, Hasher};
-use std::ops::Bound::{Excluded, Included};
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 #[test]
 fn test_clone_eq() {
@@ -527,7 +525,7 @@ fn test_extend_ref() {
 #[test]
 fn test_recovery() {
     #[derive(Debug)]
-    struct Foo(&'static str, i32);
+    struct Foo(&'static str, #[allow(dead_code)] i32);
 
     impl PartialEq for Foo {
         fn eq(&self, other: &Self) -> bool {
@@ -708,9 +706,9 @@ fn test_ord_absence() {
     }
 
     fn set_debug<K: Debug>(set: BTreeSet<K>) {
-        format!("{set:?}");
-        format!("{:?}", set.iter());
-        format!("{:?}", set.into_iter());
+        let _ = format!("{set:?}");
+        let _ = format!("{:?}", set.iter());
+        let _ = format!("{:?}", set.into_iter());
     }
 
     fn set_clone<K: Clone>(mut set: BTreeSet<K>) {

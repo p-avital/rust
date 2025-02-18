@@ -1,10 +1,23 @@
-use rustc_macros::Diagnostic;
-use rustc_session::config::CrateType;
-use rustc_span::{Span, Symbol};
-use rustc_target::spec::TargetTriple;
-
 use std::io;
 use std::path::Path;
+
+use rustc_macros::Diagnostic;
+use rustc_span::{Span, Symbol};
+
+#[derive(Diagnostic)]
+#[diag(interface_crate_name_does_not_match)]
+pub(crate) struct CrateNameDoesNotMatch {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) crate_name: Symbol,
+    pub(crate) attr_crate_name: Symbol,
+}
+
+#[derive(Diagnostic)]
+#[diag(interface_crate_name_invalid)]
+pub(crate) struct CrateNameInvalid<'a> {
+    pub(crate) crate_name: &'a str,
+}
 
 #[derive(Diagnostic)]
 #[diag(interface_ferris_identifier)]
@@ -91,13 +104,6 @@ pub struct FailedWritingFile<'a> {
 pub struct ProcMacroCratePanicAbort;
 
 #[derive(Diagnostic)]
-#[diag(interface_unsupported_crate_type_for_target)]
-pub struct UnsupportedCrateTypeForTarget<'a> {
-    pub crate_type: CrateType,
-    pub target_triple: &'a TargetTriple,
-}
-
-#[derive(Diagnostic)]
 #[diag(interface_multiple_output_types_adaption)]
 pub struct MultipleOutputTypesAdaption;
 
@@ -112,3 +118,22 @@ pub struct IgnoringOutDir;
 #[derive(Diagnostic)]
 #[diag(interface_multiple_output_types_to_stdout)]
 pub struct MultipleOutputTypesToStdout;
+
+#[derive(Diagnostic)]
+#[diag(interface_abi_required_feature)]
+#[note]
+#[note(interface_abi_required_feature_issue)]
+pub(crate) struct AbiRequiredTargetFeature<'a> {
+    pub feature: &'a str,
+    pub enabled: &'a str,
+}
+
+#[derive(Diagnostic)]
+#[diag(interface_limit_invalid)]
+pub(crate) struct LimitInvalid<'a> {
+    #[primary_span]
+    pub span: Span,
+    #[label]
+    pub value_span: Span,
+    pub error_str: &'a str,
+}

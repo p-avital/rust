@@ -1,6 +1,4 @@
-// check-pass
-
-#![feature(target_feature_11)]
+//@ check-pass
 
 struct S<T>(T)
 where

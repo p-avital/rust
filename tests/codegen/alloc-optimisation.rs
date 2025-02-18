@@ -1,6 +1,4 @@
-//
-// no-system-llvm
-// compile-flags: -O
+//@ compile-flags: -Copt-level=3
 #![crate_type = "lib"]
 
 #[no_mangle]
