@@ -44,8 +44,6 @@ remove_labels = ["S-waiting-on-author"]
 # Those labels are added when PR author requests a review from an assignee
 add_labels = ["S-waiting-on-review"]
 
-[glacier]
-
 [ping.icebreakers-llvm]
 message = """\
 Hey LLVM ICE-breakers! This bug has been identified as a good
@@ -133,7 +131,7 @@ In case it's useful, here are some [instructions] for tackling these sorts of is
 
 [instructions]: https://rustc-dev-guide.rust-lang.org/notification-groups/rust-for-linux.html
 """
-label = "O-rfl"
+label = "A-rust-for-linux"
 
 [ping.wasm]
 alias = ["webassembly"]
@@ -887,6 +885,7 @@ message = "Some changes occurred in HTML/CSS/JS."
 cc = [
     "@GuillaumeGomez",
     "@jsha",
+    "@lolbinarycat",
 ]
 
 [mentions."tests/rustdoc-gui/"]
@@ -1171,7 +1170,6 @@ contributing_url = "https://rustc-dev-guide.rust-lang.org/getting-started.html"
 users_on_vacation = [
     "fmease",
     "jyn514",
-    "Noratrieb",
     "spastorino",
 ]
 
@@ -1198,7 +1196,6 @@ compiler = [
     "@lcnr",
     "@Nadrieril",
     "@nnethercote",
-    "@Noratrieb",
     "@oli-obk",
     "@petrochenkov",
     "@SparrowLii",
@@ -1206,7 +1203,6 @@ compiler = [
 ]
 libs = [
     "@Mark-Simulacrum",
-    "@Noratrieb",
     "@workingjubilee",
     "@joboet",
     "@jhpratt",
@@ -1424,3 +1420,15 @@ compiletest = [
 # Enable `@rustbot note` functionality
 # Documentation at: https://forge.rust-lang.org/triagebot/note.html
 [note]
+
+[behind-upstream]
+days-threshold = 14
+
+# Canonicalize issue numbers to avoid closing the wrong issue
+# when commits are included in subtrees, as well as warning links in commits.
+# Documentation at: https://forge.rust-lang.org/triagebot/issue-links.html
+[issue-links]
+
+# Prevents mentions in commits to avoid users being spammed
+# Documentation at: https://forge.rust-lang.org/triagebot/no-mentions.html
+[no-mentions]

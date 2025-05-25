@@ -5,7 +5,9 @@ use std::{fmt, iter};
 
 use arrayvec::ArrayVec;
 use rustc_abi::{ExternAbi, VariantIdx};
-use rustc_attr_parsing::{AttributeKind, ConstStability, Deprecation, Stability, StableSince};
+use rustc_attr_data_structures::{
+    AttributeKind, ConstStability, Deprecation, Stability, StableSince,
+};
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_hir::def::{CtorKind, DefKind, Res};
 use rustc_hir::def_id::{CrateNum, DefId, LOCAL_CRATE, LocalDefId};
@@ -403,13 +405,13 @@ impl Item {
             // versions; the paths that are exposed through it are "deprecated" because they
             // were never supposed to work at all.
             let stab = self.stability(tcx)?;
-            if let rustc_attr_parsing::StabilityLevel::Stable {
+            if let rustc_attr_data_structures::StabilityLevel::Stable {
                 allowed_through_unstable_modules: Some(note),
                 ..
             } = stab.level
             {
                 Some(Deprecation {
-                    since: rustc_attr_parsing::DeprecatedSince::Unspecified,
+                    since: rustc_attr_data_structures::DeprecatedSince::Unspecified,
                     note: Some(note),
                     suggestion: None,
                 })
@@ -772,20 +774,11 @@ impl Item {
             .filter_map(|attr| {
                 if is_json {
                     match attr {
-                        hir::Attribute::Parsed(AttributeKind::Deprecation { .. }) => {
-                            // rustdoc-json stores this in `Item::deprecation`, so we
-                            // don't want it it `Item::attrs`.
-                            None
-                        }
-                        rustc_hir::Attribute::Parsed(rustc_attr_parsing::AttributeKind::Repr(
-                            ..,
-                        )) => {
-                            // We have separate pretty-printing logic for `#[repr(..)]` attributes.
-                            // For example, there are circumstances where `#[repr(transparent)]`
-                            // is applied but should not be publicly shown in rustdoc
-                            // because it isn't public API.
-                            None
-                        }
+                        // rustdoc-json stores this in `Item::deprecation`, so we
+                        // don't want it it `Item::attrs`.
+                        hir::Attribute::Parsed(AttributeKind::Deprecation { .. }) => None,
+                        // We have separate pretty-printing logic for `#[repr(..)]` attributes.
+                        hir::Attribute::Parsed(AttributeKind::Repr(..)) => None,
                         _ => Some({
                             let mut s = rustc_hir_pretty::attribute_to_string(&tcx, attr);
                             assert_eq!(s.pop(), Some('\n'));
@@ -818,7 +811,8 @@ impl Item {
             if repr.transparent() {
                 // Render `repr(transparent)` iff the non-1-ZST field is public or at least one
                 // field is public in case all fields are 1-ZST fields.
-                let render_transparent = cache.document_private
+                let render_transparent = is_json
+                    || cache.document_private
                     || adt
                         .all_fields()
                         .find(|field| {
@@ -1337,9 +1331,9 @@ pub(crate) enum WherePredicate {
 
 impl WherePredicate {
     pub(crate) fn get_bounds(&self) -> Option<&[GenericBound]> {
-        match *self {
-            WherePredicate::BoundPredicate { ref bounds, .. } => Some(bounds),
-            WherePredicate::RegionPredicate { ref bounds, .. } => Some(bounds),
+        match self {
+            WherePredicate::BoundPredicate { bounds, .. } => Some(bounds),
+            WherePredicate::RegionPredicate { bounds, .. } => Some(bounds),
             _ => None,
         }
     }
@@ -1709,13 +1703,13 @@ impl Type {
     ///
     /// [clean]: crate::clean
     pub(crate) fn def_id(&self, cache: &Cache) -> Option<DefId> {
-        let t: PrimitiveType = match *self {
-            Type::Path { ref path } => return Some(path.def_id()),
-            DynTrait(ref bounds, _) => return bounds.first().map(|b| b.trait_.def_id()),
-            Primitive(p) => return cache.primitive_locations.get(&p).cloned(),
+        let t: PrimitiveType = match self {
+            Type::Path { path } => return Some(path.def_id()),
+            DynTrait(bounds, _) => return bounds.first().map(|b| b.trait_.def_id()),
+            Primitive(p) => return cache.primitive_locations.get(p).cloned(),
             BorrowedRef { type_: box Generic(..), .. } => PrimitiveType::Reference,
-            BorrowedRef { ref type_, .. } => return type_.def_id(cache),
-            Tuple(ref tys) => {
+            BorrowedRef { type_, .. } => return type_.def_id(cache),
+            Tuple(tys) => {
                 if tys.is_empty() {
                     PrimitiveType::Unit
                 } else {
@@ -1727,7 +1721,7 @@ impl Type {
             Array(..) => PrimitiveType::Array,
             Type::Pat(..) => PrimitiveType::Pat,
             RawPointer(..) => PrimitiveType::RawPointer,
-            QPath(box QPathData { ref self_type, .. }) => return self_type.def_id(cache),
+            QPath(box QPathData { self_type, .. }) => return self_type.def_id(cache),
             Generic(_) | SelfTy | Infer | ImplTrait(_) | UnsafeBinder(_) => return None,
         };
         Primitive(t).def_id(cache)

@@ -85,7 +85,7 @@ impl From<Ident> for LifetimeSyntax {
     fn from(ident: Ident) -> Self {
         let name = ident.name;
 
-        if name == kw::Empty {
+        if name == sym::empty {
             unreachable!("A lifetime name should never be empty");
         } else if name == kw::UnderscoreLifetime {
             LifetimeSyntax::Anonymous
@@ -2744,6 +2744,8 @@ pub enum ExprKind<'hir> {
     ///
     /// The "then" expr is always `ExprKind::Block`. If present, the "else" expr is always
     /// `ExprKind::Block` (for `else`) or `ExprKind::If` (for `else if`).
+    /// Note that using an `Expr` instead of a `Block` for the "then" part is intentional,
+    /// as it simplifies the type coercion machinery.
     If(&'hir Expr<'hir>, &'hir Expr<'hir>, Option<&'hir Expr<'hir>>),
     /// A conditionless loop (can be exited with `break`, `continue`, or `return`).
     ///

@@ -154,7 +154,7 @@ impl<'gcc, 'tcx> StaticCodegenMethods for CodegenCx<'gcc, 'tcx> {
             // TODO(antoyo): set link section.
         }
 
-        if attrs.flags.contains(CodegenFnAttrFlags::USED)
+        if attrs.flags.contains(CodegenFnAttrFlags::USED_COMPILER)
             || attrs.flags.contains(CodegenFnAttrFlags::USED_LINKER)
         {
             self.add_used_global(global.to_rvalue());
@@ -191,13 +191,11 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
                 // TODO(antoyo): check if it's okay that no link_section is set.
 
                 let typ = self.val_ty(cv).get_aligned(align.bytes());
-                let global = self.declare_private_global(&name[..], typ);
-                global
+                self.declare_private_global(&name[..], typ)
             }
             _ => {
                 let typ = self.val_ty(cv).get_aligned(align.bytes());
-                let global = self.declare_unnamed_global(typ);
-                global
+                self.declare_unnamed_global(typ)
             }
         };
         global.global_set_initializer_rvalue(cv);
