@@ -7,7 +7,6 @@ use std::str::FromStr;
 use std::time::Duration;
 use std::{cmp, env, iter};
 
-use proc_macro::bridge::client::ProcMacro;
 use rustc_ast::expand::allocator::{AllocatorKind, alloc_error_handler_name, global_fn_name};
 use rustc_ast::{self as ast, *};
 use rustc_data_structures::fx::FxHashSet;
@@ -23,6 +22,7 @@ use rustc_hir::definitions::Definitions;
 use rustc_index::IndexVec;
 use rustc_middle::bug;
 use rustc_middle::ty::{TyCtxt, TyCtxtFeed};
+use rustc_proc_macro::bridge::client::ProcMacro;
 use rustc_session::config::{
     self, CrateType, ExtendedTargetModifierInfo, ExternLocation, OptionsTargetModifiers,
     TargetModifier,
@@ -469,6 +469,27 @@ impl CStore {
             let dep_mods = data.target_modifiers();
             if mods != dep_mods {
                 Self::report_target_modifiers_extended(tcx, krate, &mods, &dep_mods, data);
+            }
+        }
+    }
+
+    // Report about async drop types in dependency if async drop feature is disabled
+    pub fn report_incompatible_async_drop_feature(&self, tcx: TyCtxt<'_>, krate: &Crate) {
+        if tcx.features().async_drop() {
+            return;
+        }
+        for (_cnum, data) in self.iter_crate_data() {
+            if data.is_proc_macro_crate() {
+                continue;
+            }
+            if data.has_async_drops() {
+                let extern_crate = data.name();
+                let local_crate = tcx.crate_name(LOCAL_CRATE);
+                tcx.dcx().emit_warn(errors::AsyncDropTypesInDependency {
+                    span: krate.spans.inner_span.shrink_to_lo(),
+                    extern_crate,
+                    local_crate,
+                });
             }
         }
     }

@@ -2,7 +2,7 @@ use std::any::Any;
 use std::mem;
 use std::sync::Arc;
 
-use rustc_attr_parsing::Deprecation;
+use rustc_attr_data_structures::Deprecation;
 use rustc_hir::def::{CtorKind, DefKind, Res};
 use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, LOCAL_CRATE};
 use rustc_hir::definitions::{DefKey, DefPath, DefPathHash};
@@ -425,6 +425,7 @@ provide! { tcx, def_id, other, cdata,
     doc_link_traits_in_scope => {
         tcx.arena.alloc_from_iter(cdata.get_doc_link_traits_in_scope(def_id.index))
     }
+    anon_const_kind => { table }
 }
 
 pub(in crate::rmeta) fn provide(providers: &mut Providers) {
