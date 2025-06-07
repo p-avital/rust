@@ -180,7 +180,7 @@ pub(crate) fn check_intrinsic_type(
         ty::BoundVariableKind::Region(ty::BoundRegionKind::ClosureEnv),
     ]);
     let mk_va_list_ty = |mutbl| {
-        let did = tcx.require_lang_item(LangItem::VaList, Some(span));
+        let did = tcx.require_lang_item(LangItem::VaList, span);
         let region = ty::Region::new_bound(
             tcx,
             ty::INNERMOST,
@@ -204,24 +204,25 @@ pub(crate) fn check_intrinsic_type(
 
         // Each atomic op has variants with different suffixes (`_seq_cst`, `_acquire`, etc.). Use
         // string ops to strip the suffixes, because the variants all get the same treatment here.
-        let (n_tps, inputs, output) = match split[1] {
+        let (n_tps, n_cts, inputs, output) = match split[1] {
             "cxchg" | "cxchgweak" => (
                 1,
+                0,
                 vec![Ty::new_mut_ptr(tcx, param(0)), param(0), param(0)],
                 Ty::new_tup(tcx, &[param(0), tcx.types.bool]),
             ),
-            "load" => (1, vec![Ty::new_imm_ptr(tcx, param(0))], param(0)),
-            "store" => (1, vec![Ty::new_mut_ptr(tcx, param(0)), param(0)], tcx.types.unit),
+            "load" => (1, 1, vec![Ty::new_imm_ptr(tcx, param(0))], param(0)),
+            "store" => (1, 0, vec![Ty::new_mut_ptr(tcx, param(0)), param(0)], tcx.types.unit),
 
             "xchg" | "xadd" | "xsub" | "and" | "nand" | "or" | "xor" | "max" | "min" | "umax"
-            | "umin" => (1, vec![Ty::new_mut_ptr(tcx, param(0)), param(0)], param(0)),
-            "fence" | "singlethreadfence" => (0, Vec::new(), tcx.types.unit),
+            | "umin" => (1, 0, vec![Ty::new_mut_ptr(tcx, param(0)), param(0)], param(0)),
+            "fence" | "singlethreadfence" => (0, 0, Vec::new(), tcx.types.unit),
             op => {
                 tcx.dcx().emit_err(UnrecognizedAtomicOperation { span, op });
                 return;
             }
         };
-        (n_tps, 0, 0, inputs, output, hir::Safety::Unsafe)
+        (n_tps, 0, n_cts, inputs, output, hir::Safety::Unsafe)
     } else if intrinsic_name == sym::contract_check_ensures {
         // contract_check_ensures::<Ret, C>(Ret, C) -> Ret
         // where C: for<'a> Fn(&'a Ret) -> bool,
@@ -264,6 +265,7 @@ pub(crate) fn check_intrinsic_type(
                 vec![Ty::new_imm_ptr(tcx, param(0)), tcx.types.isize],
                 Ty::new_imm_ptr(tcx, param(0)),
             ),
+            sym::slice_get_unchecked => (3, 0, vec![param(1), tcx.types.usize], param(0)),
             sym::ptr_mask => (
                 1,
                 0,
@@ -440,9 +442,7 @@ pub(crate) fn check_intrinsic_type(
 
             sym::bswap | sym::bitreverse => (1, 0, vec![param(0)], param(0)),
 
-            sym::three_way_compare => {
-                (1, 0, vec![param(0), param(0)], tcx.ty_ordering_enum(Some(span)))
-            }
+            sym::three_way_compare => (1, 0, vec![param(0), param(0)], tcx.ty_ordering_enum(span)),
 
             sym::add_with_overflow | sym::sub_with_overflow | sym::mul_with_overflow => {
                 (1, 0, vec![param(0), param(0)], Ty::new_tup(tcx, &[param(0), tcx.types.bool]))
@@ -518,7 +518,7 @@ pub(crate) fn check_intrinsic_type(
 
             sym::discriminant_value => {
                 let assoc_items = tcx.associated_item_def_ids(
-                    tcx.require_lang_item(hir::LangItem::DiscriminantKind, None),
+                    tcx.require_lang_item(hir::LangItem::DiscriminantKind, span),
                 );
                 let discriminant_def_id = assoc_items[0];
 

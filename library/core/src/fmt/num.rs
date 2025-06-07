@@ -208,7 +208,11 @@ macro_rules! impl_Display {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 #[cfg(not(feature = "optimize_for_size"))]
                 {
-                    self._fmt(true, f)
+                    const MAX_DEC_N: usize = $unsigned::MAX.ilog(10) as usize + 1;
+                    // Buffer decimals for $unsigned with right alignment.
+                    let mut buf = [MaybeUninit::<u8>::uninit(); MAX_DEC_N];
+
+                    f.pad_integral(true, "", self._fmt(&mut buf))
                 }
                 #[cfg(feature = "optimize_for_size")]
                 {
@@ -222,7 +226,11 @@ macro_rules! impl_Display {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 #[cfg(not(feature = "optimize_for_size"))]
                 {
-                    return self.unsigned_abs()._fmt(*self >= 0, f);
+                    const MAX_DEC_N: usize = $unsigned::MAX.ilog(10) as usize + 1;
+                    // Buffer decimals for $unsigned with right alignment.
+                    let mut buf = [MaybeUninit::<u8>::uninit(); MAX_DEC_N];
+
+                    f.pad_integral(*self >= 0, "", self.unsigned_abs()._fmt(&mut buf))
                 }
                 #[cfg(feature = "optimize_for_size")]
                 {
@@ -233,10 +241,13 @@ macro_rules! impl_Display {
 
         #[cfg(not(feature = "optimize_for_size"))]
         impl $unsigned {
-            fn _fmt(self, is_nonnegative: bool, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                const MAX_DEC_N: usize = $unsigned::MAX.ilog(10) as usize + 1;
-                // Buffer decimals for $unsigned with right alignment.
-                let mut buf = [MaybeUninit::<u8>::uninit(); MAX_DEC_N];
+            #[doc(hidden)]
+            #[unstable(
+                feature = "fmt_internals",
+                reason = "specialized method meant to only be used by `SpecToString` implementation",
+                issue = "none"
+            )]
+            pub fn _fmt<'a>(self, buf: &'a mut [MaybeUninit::<u8>]) -> &'a str {
                 // Count the number of bytes in buf that are not initialized.
                 let mut offset = buf.len();
                 // Consume the least-significant decimals from a working copy.
@@ -301,13 +312,12 @@ macro_rules! impl_Display {
                 // SAFETY: All buf content since offset is set.
                 let written = unsafe { buf.get_unchecked(offset..) };
                 // SAFETY: Writes use ASCII from the lookup table exclusively.
-                let as_str = unsafe {
+                unsafe {
                     str::from_utf8_unchecked(slice::from_raw_parts(
                           MaybeUninit::slice_as_ptr(written),
                           written.len(),
                     ))
-                };
-                f.pad_integral(is_nonnegative, "", as_str)
+                }
             }
         })*
 
@@ -668,8 +678,8 @@ impl fmt::Display for i128 {
 /// It also has to handle 1 last item, as 10^40 > 2^128 > 10^39, whereas
 /// 10^20 > 2^64 > 10^19.
 fn fmt_u128(n: u128, is_nonnegative: bool, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    // 2^128 is about 3*10^38, so 39 gives an extra byte of space
-    let mut buf = [MaybeUninit::<u8>::uninit(); 39];
+    const MAX_DEC_N: usize = u128::MAX.ilog(10) as usize + 1;
+    let mut buf = [MaybeUninit::<u8>::uninit(); MAX_DEC_N];
     let mut curr = buf.len();
 
     let (n, rem) = udiv_1e19(n);

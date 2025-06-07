@@ -1,8 +1,8 @@
 // tidy-alphabetical-start
 #![allow(rustc::diagnostic_outside_of_impl)]
 #![allow(rustc::untranslatable_diagnostic)]
-#![cfg_attr(bootstrap, feature(let_chains))]
 #![feature(array_windows)]
+#![feature(assert_matches)]
 #![feature(box_patterns)]
 #![feature(if_let_guard)]
 #![feature(iter_intersperse)]
@@ -31,6 +31,7 @@ mod fn_ctxt;
 mod gather_locals;
 mod intrinsicck;
 mod method;
+mod naked_functions;
 mod op;
 mod opaque_types;
 mod pat;
@@ -55,8 +56,8 @@ use rustc_middle::query::Providers;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_middle::{bug, span_bug};
 use rustc_session::config;
-use rustc_span::Span;
 use rustc_span::def_id::LocalDefId;
+use rustc_span::{Span, sym};
 use tracing::{debug, instrument};
 use typeck_root_ctxt::TypeckRootCtxt;
 
@@ -170,6 +171,10 @@ fn typeck_with_inspect<'tcx>(
                 .map(|(idx, ty)| fcx.normalize(arg_span(idx), ty)),
         );
 
+        if tcx.has_attr(def_id, sym::naked) {
+            naked_functions::typeck_naked_fn(tcx, def_id, body);
+        }
+
         check_fn(&mut fcx, fn_sig, None, decl, def_id, body, tcx.features().unsized_fn_params());
     } else {
         let expected_type = if let Some(infer_ty) = infer_type_if_missing(&fcx, node) {
@@ -196,13 +201,16 @@ fn typeck_with_inspect<'tcx>(
         fcx.write_ty(id, expected_type);
     };
 
-    // Whether to check repeat exprs before/after inference fallback is somewhat arbitrary of a decision
-    // as neither option is strictly more permissive than the other. However, we opt to check repeat exprs
-    // first as errors from not having inferred array lengths yet seem less confusing than errors from inference
-    // fallback arbitrarily inferring something incompatible with `Copy` inference side effects.
+    // Whether to check repeat exprs before/after inference fallback is somewhat
+    // arbitrary of a decision as neither option is strictly more permissive than
+    // the other. However, we opt to check repeat exprs first as errors from not
+    // having inferred array lengths yet seem less confusing than errors from inference
+    // fallback arbitrarily inferring something incompatible with `Copy` inference
+    // side effects.
     //
-    // This should also be forwards compatible with moving repeat expr checks to a custom goal kind or using
-    // marker traits in the future.
+    // FIXME(#140855): This should also be forwards compatible with moving
+    // repeat expr checks to a custom goal kind or using marker traits in
+    // the future.
     fcx.check_repeat_exprs();
 
     fcx.type_inference_fallback();
