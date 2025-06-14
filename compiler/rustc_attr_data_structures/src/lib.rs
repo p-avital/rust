@@ -1,6 +1,5 @@
 // tidy-alphabetical-start
 #![allow(internal_features)]
-#![cfg_attr(bootstrap, feature(let_chains))]
 #![doc(rust_logo)]
 #![feature(rustdoc_internals)]
 // tidy-alphabetical-end
@@ -8,6 +7,8 @@
 mod attributes;
 mod stability;
 mod version;
+
+pub mod lints;
 
 use std::num::NonZero;
 

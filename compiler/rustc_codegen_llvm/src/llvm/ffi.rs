@@ -15,6 +15,7 @@
 
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::num::NonZero;
 use std::ptr;
 
 use bitflags::bitflags;
@@ -426,14 +427,14 @@ pub(crate) enum AtomicOrdering {
 }
 
 impl AtomicOrdering {
-    pub(crate) fn from_generic(ao: rustc_codegen_ssa::common::AtomicOrdering) -> Self {
-        use rustc_codegen_ssa::common::AtomicOrdering as Common;
+    pub(crate) fn from_generic(ao: rustc_middle::ty::AtomicOrdering) -> Self {
+        use rustc_middle::ty::AtomicOrdering as Common;
         match ao {
             Common::Relaxed => Self::Monotonic,
             Common::Acquire => Self::Acquire,
             Common::Release => Self::Release,
-            Common::AcquireRelease => Self::AcquireRelease,
-            Common::SequentiallyConsistent => Self::SequentiallyConsistent,
+            Common::AcqRel => Self::AcquireRelease,
+            Common::SeqCst => Self::SequentiallyConsistent,
         }
     }
 }
@@ -1194,6 +1195,17 @@ unsafe extern "C" {
 
     // Operations on functions
     pub(crate) fn LLVMSetFunctionCallConv(Fn: &Value, CC: c_uint);
+
+    // Operations about llvm intrinsics
+    pub(crate) fn LLVMLookupIntrinsicID(Name: *const c_char, NameLen: size_t) -> c_uint;
+    pub(crate) fn LLVMIntrinsicIsOverloaded(ID: NonZero<c_uint>) -> Bool;
+    pub(crate) fn LLVMIntrinsicCopyOverloadedName2<'a>(
+        Mod: &'a Module,
+        ID: NonZero<c_uint>,
+        ParamTypes: *const &'a Type,
+        ParamCount: size_t,
+        NameLength: *mut size_t,
+    ) -> *mut c_char;
 
     // Operations on parameters
     pub(crate) fn LLVMIsAArgument(Val: &Value) -> Option<&Value>;

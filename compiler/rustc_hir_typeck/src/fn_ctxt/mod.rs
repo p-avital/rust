@@ -14,7 +14,7 @@ use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::{self as hir, HirId, ItemLocalMap};
 use rustc_hir_analysis::hir_ty_lowering::{HirTyLowerer, RegionInferReason};
 use rustc_infer::infer;
-use rustc_infer::traits::Obligation;
+use rustc_infer::traits::{DynCompatibilityViolation, Obligation};
 use rustc_middle::ty::{self, Const, Ty, TyCtxt, TypeVisitableExt};
 use rustc_session::Session;
 use rustc_span::{self, DUMMY_SP, ErrorGuaranteed, Ident, Span, sym};
@@ -81,7 +81,7 @@ pub(crate) struct FnCtxt<'a, 'tcx> {
     /// you get indicates whether any subexpression that was
     /// evaluating up to and including `X` diverged.
     ///
-    /// We currently use this flag only for diagnostic purposes:
+    /// We currently use this flag for the following purposes:
     ///
     /// - To warn about unreachable code: if, after processing a
     ///   sub-expression but before we have applied the effects of the
@@ -94,6 +94,8 @@ pub(crate) struct FnCtxt<'a, 'tcx> {
     ///   warning. This corresponds to something like `{return;
     ///   foo();}` or `{return; 22}`, where we would warn on the
     ///   `foo()` or `22`.
+    /// - To assign the `!` type to block expressions with diverging
+    ///   statements.
     ///
     /// An expression represents dead code if, after checking it,
     /// the diverges flag is set to something other than `Maybe`.
@@ -308,17 +310,16 @@ impl<'tcx> HirTyLowerer<'tcx> for FnCtxt<'_, 'tcx> {
         ))
     }
 
-    fn lower_assoc_shared(
+    fn lower_assoc_item_path(
         &self,
         span: Span,
         item_def_id: DefId,
         item_segment: &rustc_hir::PathSegment<'tcx>,
         poly_trait_ref: ty::PolyTraitRef<'tcx>,
-        _assoc_tag: ty::AssocTag,
     ) -> Result<(DefId, ty::GenericArgsRef<'tcx>), ErrorGuaranteed> {
         let trait_ref = self.instantiate_binder_with_fresh_vars(
             span,
-            // FIXME(mgca): this should be assoc const if that is the `kind`
+            // FIXME(mgca): `item_def_id` can be an AssocConst; rename this variant.
             infer::BoundRegionConversionTime::AssocTypeProjection(item_def_id),
             poly_trait_ref,
         );
@@ -381,13 +382,17 @@ impl<'tcx> HirTyLowerer<'tcx> for FnCtxt<'_, 'tcx> {
         _hir_id: rustc_hir::HirId,
         _hir_ty: Option<&hir::Ty<'_>>,
     ) -> (Vec<Ty<'tcx>>, Ty<'tcx>) {
-        let input_tys = decl.inputs.iter().map(|a| self.lowerer().lower_arg_ty(a, None)).collect();
+        let input_tys = decl.inputs.iter().map(|a| self.lowerer().lower_ty(a)).collect();
 
         let output_ty = match decl.output {
             hir::FnRetTy::Return(output) => self.lowerer().lower_ty(output),
             hir::FnRetTy::DefaultReturn(..) => self.tcx().types.unit,
         };
         (input_tys, output_ty)
+    }
+
+    fn dyn_compatibility_violations(&self, trait_def_id: DefId) -> Vec<DynCompatibilityViolation> {
+        self.tcx.dyn_compatibility_violations(trait_def_id).to_vec()
     }
 }
 
@@ -407,9 +412,10 @@ pub(crate) struct LoweredTy<'tcx> {
 
 impl<'tcx> LoweredTy<'tcx> {
     fn from_raw(fcx: &FnCtxt<'_, 'tcx>, span: Span, raw: Ty<'tcx>) -> LoweredTy<'tcx> {
-        // FIXME(-Znext-solver): We're still figuring out how to best handle
-        // normalization and this doesn't feel too great. We should look at this
-        // code again before stabilizing it.
+        // FIXME(-Znext-solver=no): This is easier than requiring all uses of `LoweredTy`
+        // to call `try_structurally_resolve_type` instead. This seems like a lot of
+        // effort, especially as we're still supporting the old solver. We may revisit
+        // this in the future.
         let normalized = if fcx.next_trait_solver() {
             fcx.try_structurally_resolve_type(span, raw)
         } else {

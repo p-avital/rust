@@ -22,7 +22,7 @@ fn configure_with_args(cmd: &[String], host: &[&str], target: &[&str]) -> Config
     let mut config = Config::parse(Flags::parse(cmd));
     // don't save toolstates
     config.save_toolstates = None;
-    config.dry_run = DryRun::SelfCheck;
+    config.set_dry_run(DryRun::SelfCheck);
 
     // Ignore most submodules, since we don't need them for a dry run, and the
     // tests run much faster without them.
@@ -46,7 +46,7 @@ fn configure_with_args(cmd: &[String], host: &[&str], target: &[&str]) -> Config
         .join(&thread::current().name().unwrap_or("unknown").replace(":", "-"));
     t!(fs::create_dir_all(&dir));
     config.out = dir;
-    config.build = TargetSelection::from_user(TEST_TRIPLE_1);
+    config.host_target = TargetSelection::from_user(TEST_TRIPLE_1);
     config.hosts = host.iter().map(|s| TargetSelection::from_user(s)).collect();
     config.targets = target.iter().map(|s| TargetSelection::from_user(s)).collect();
     config
@@ -237,7 +237,7 @@ fn alias_and_path_for_library() {
     );
     assert_eq!(
         first(cache.all::<doc::Std>()),
-        &[doc_std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0)]
+        &[doc_std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 1)]
     );
 }
 
@@ -248,19 +248,6 @@ fn ci_rustc_if_unchanged_invalidate_on_compiler_changes() {
         ctx.create_upstream_merge(&["compiler/bar"]);
         // This change should invalidate download-ci-rustc
         ctx.create_nonupstream_merge(&["compiler/foo"]);
-
-        let config = parse_config_download_rustc_at(ctx.get_path(), "if-unchanged", true);
-        assert_eq!(config.download_rustc_commit, None);
-    });
-}
-
-#[test]
-fn ci_rustc_if_unchanged_invalidate_on_library_changes_in_ci() {
-    git_test(|ctx| {
-        prepare_rustc_checkout(ctx);
-        ctx.create_upstream_merge(&["compiler/bar"]);
-        // This change should invalidate download-ci-rustc
-        ctx.create_nonupstream_merge(&["library/foo"]);
 
         let config = parse_config_download_rustc_at(ctx.get_path(), "if-unchanged", true);
         assert_eq!(config.download_rustc_commit, None);
@@ -433,14 +420,14 @@ mod defaults {
         assert_eq!(first(cache.all::<doc::ErrorIndex>()), &[doc::ErrorIndex { target: a },]);
         assert_eq!(
             first(cache.all::<tool::ErrorIndex>()),
-            &[tool::ErrorIndex { compiler: Compiler::new(0, a) }]
+            &[tool::ErrorIndex { compiler: Compiler::new(1, a) }]
         );
-        // docs should be built with the beta compiler, not with the stage0 artifacts.
+        // docs should be built with the stage0 compiler, not with the stage0 artifacts.
         // recall that rustdoc is off-by-one: `stage` is the compiler rustdoc is _linked_ to,
         // not the one it was built by.
         assert_eq!(
             first(cache.all::<tool::Rustdoc>()),
-            &[tool::Rustdoc { compiler: Compiler::new(0, a) },]
+            &[tool::Rustdoc { compiler: Compiler::new(1, a) },]
         );
     }
 }
@@ -1115,7 +1102,7 @@ fn test_prebuilt_llvm_config_path_resolution() {
     let actual = drop_win_disk_prefix_if_present(actual);
     assert_eq!(expected, actual);
 
-    let actual = prebuilt_llvm_config(&builder, builder.config.build, false)
+    let actual = prebuilt_llvm_config(&builder, builder.config.host_target, false)
         .llvm_result()
         .llvm_config
         .clone();
@@ -1133,15 +1120,15 @@ fn test_prebuilt_llvm_config_path_resolution() {
     let build = Build::new(config.clone());
     let builder = Builder::new(&build);
 
-    let actual = prebuilt_llvm_config(&builder, builder.config.build, false)
+    let actual = prebuilt_llvm_config(&builder, builder.config.host_target, false)
         .llvm_result()
         .llvm_config
         .clone();
     let expected = builder
         .out
-        .join(builder.config.build)
+        .join(builder.config.host_target)
         .join("llvm/bin")
-        .join(exe("llvm-config", builder.config.build));
+        .join(exe("llvm-config", builder.config.host_target));
     assert_eq!(expected, actual);
 
     let config = configure(
@@ -1156,15 +1143,15 @@ fn test_prebuilt_llvm_config_path_resolution() {
         let build = Build::new(config.clone());
         let builder = Builder::new(&build);
 
-        let actual = prebuilt_llvm_config(&builder, builder.config.build, false)
+        let actual = prebuilt_llvm_config(&builder, builder.config.host_target, false)
             .llvm_result()
             .llvm_config
             .clone();
         let expected = builder
             .out
-            .join(builder.config.build)
+            .join(builder.config.host_target)
             .join("ci-llvm/bin")
-            .join(exe("llvm-config", builder.config.build));
+            .join(exe("llvm-config", builder.config.host_target));
         assert_eq!(expected, actual);
     }
 }
@@ -1176,7 +1163,7 @@ fn test_is_builder_target() {
 
     for (target1, target2) in [(target1, target2), (target2, target1)] {
         let mut config = configure("build", &[], &[]);
-        config.build = target1;
+        config.host_target = target1;
         let build = Build::new(config);
         let builder = Builder::new(&build);
 

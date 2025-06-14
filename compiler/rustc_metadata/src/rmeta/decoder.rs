@@ -6,7 +6,6 @@ use std::sync::{Arc, OnceLock};
 use std::{io, iter, mem};
 
 pub(super) use cstore_impl::provide;
-use proc_macro::bridge::client::ProcMacro;
 use rustc_ast as ast;
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxIndexMap;
@@ -26,6 +25,7 @@ use rustc_middle::mir::interpret::{AllocDecodingSession, AllocDecodingState};
 use rustc_middle::ty::Visibility;
 use rustc_middle::ty::codec::TyDecoder;
 use rustc_middle::{bug, implement_ty_decoder};
+use rustc_proc_macro::bridge::client::ProcMacro;
 use rustc_serialize::opaque::MemDecoder;
 use rustc_serialize::{Decodable, Decoder};
 use rustc_session::Session;
@@ -1649,34 +1649,7 @@ impl<'a> CrateMetadataRef<'a> {
                         old_name
                     && let Ok(rest) = virtual_name.strip_prefix(virtual_dir)
                 {
-                    // The std library crates are in
-                    // `$sysroot/lib/rustlib/src/rust/library`, whereas other crates
-                    // may be in `$sysroot/lib/rustlib/src/rust/` directly. So we
-                    // detect crates from the std libs and handle them specially.
-                    const STD_LIBS: &[&str] = &[
-                        "core",
-                        "alloc",
-                        "std",
-                        "test",
-                        "term",
-                        "unwind",
-                        "proc_macro",
-                        "panic_abort",
-                        "panic_unwind",
-                        "profiler_builtins",
-                        "rtstartup",
-                        "rustc-std-workspace-core",
-                        "rustc-std-workspace-alloc",
-                        "rustc-std-workspace-std",
-                        "backtrace",
-                    ];
-                    let is_std_lib = STD_LIBS.iter().any(|l| rest.starts_with(l));
-
-                    let new_path = if is_std_lib {
-                        real_dir.join("library").join(rest)
-                    } else {
-                        real_dir.join(rest)
-                    };
+                    let new_path = real_dir.join(rest);
 
                     debug!(
                         "try_to_translate_virtual_to_real: `{}` -> `{}`",
@@ -1982,6 +1955,10 @@ impl CrateMetadata {
 
     pub(crate) fn hash(&self) -> Svh {
         self.root.header.hash
+    }
+
+    pub(crate) fn has_async_drops(&self) -> bool {
+        self.root.tables.adt_async_destructor.len > 0
     }
 
     fn num_def_ids(&self) -> usize {

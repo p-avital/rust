@@ -44,31 +44,6 @@ remove_labels = ["S-waiting-on-author"]
 # Those labels are added when PR author requests a review from an assignee
 add_labels = ["S-waiting-on-review"]
 
-[glacier]
-
-[ping.icebreakers-llvm]
-message = """\
-Hey LLVM ICE-breakers! This bug has been identified as a good
-"LLVM ICE-breaking candidate". In case it's useful, here are some
-[instructions] for tackling these sorts of bugs. Maybe take a look?
-Thanks! <3
-
-[instructions]: https://rustc-dev-guide.rust-lang.org/notification-groups/llvm.html
-"""
-label = "ICEBreaker-LLVM"
-
-[ping.icebreakers-cleanup-crew]
-alias = ["cleanup", "cleanups", "cleanup-crew", "shrink", "reduce", "bisect"]
-message = """\
-Hey Cleanup Crew ICE-breakers! This bug has been identified as a good
-"Cleanup ICE-breaking candidate". In case it's useful, here are some
-[instructions] for tackling these sorts of bugs. Maybe take a look?
-Thanks! <3
-
-[instructions]: https://rustc-dev-guide.rust-lang.org/notification-groups/cleanup-crew.html
-"""
-label = "ICEBreaker-Cleanup-Crew"
-
 [ping.windows]
 message = """\
 Hey Windows Group! This bug has been identified as a good "Windows candidate".
@@ -133,7 +108,7 @@ In case it's useful, here are some [instructions] for tackling these sorts of is
 
 [instructions]: https://rustc-dev-guide.rust-lang.org/notification-groups/rust-for-linux.html
 """
-label = "O-rfl"
+label = "A-rust-for-linux"
 
 [ping.wasm]
 alias = ["webassembly"]
@@ -252,6 +227,11 @@ trigger_files = [
     "compiler/rustc_passes/src/check_attr.rs",
     "compiler/rustc_attr_parsing",
     "compiler/rustc_attr_data_structures",
+]
+
+[autolabel."A-compiler-builtins"]
+trigger_files = [
+    "library/compiler-builtins",
 ]
 
 [autolabel."F-autodiff"]
@@ -595,6 +575,13 @@ trigger_files = [
     "src/doc/rustc-dev-guide",
 ]
 
+[autolabel."A-LLVM"]
+trigger_files = [
+    "src/llvm-project",
+    "compiler/rustc_llvm",
+    "compiler/rustc_codegen_llvm",
+]
+
 [notify-zulip."I-prioritize"]
 zulip_stream = 245100 # #t-compiler/prioritization/alerts
 topic = "#{number} {title}"
@@ -708,6 +695,41 @@ topic = "#{number}: stable-nominated"
 message_on_add = [
     """\
 @**channel** PR #{number} "{title}" has been nominated for stable backport.
+""",
+    """\
+/poll Approve stable backport of #{number}?
+approve
+approve (but does not justify new dot release on its own)
+decline
+don't know
+""",
+]
+message_on_remove = "PR #{number}'s stable-nomination has been removed."
+
+[notify-zulip."beta-nominated".bootstrap]
+required_labels = ["T-bootstrap"]
+zulip_stream = 507486 # #t-infra/bootstrap/backports
+topic = "#{number}: beta-nominated"
+message_on_add = [
+    """\
+@*T-bootstrap* PR #{number} "{title}" has been nominated for beta backport.
+""",
+    """\
+/poll Approve beta backport of #{number}?
+approve
+decline
+don't know
+""",
+]
+message_on_remove = "PR #{number}'s beta-nomination has been removed."
+
+[notify-zulip."stable-nominated".bootstrap]
+required_labels = ["T-bootstrap"]
+zulip_stream = 507486 # #t-infra/bootstrap/backports
+topic = "#{number}: stable-nominated"
+message_on_add = [
+    """\
+@*T-bootstrap* PR #{number} "{title}" has been nominated for stable backport.
 """,
     """\
 /poll Approve stable backport of #{number}?
@@ -851,6 +873,15 @@ cc = ["@Urgau"]
 message = "Some changes occurred in check-cfg diagnostics"
 cc = ["@Urgau"]
 
+[mentions."library/compiler-builtins"]
+message = """
+`compiler-builtins` is developed in its own repository. If possible, consider \
+making this change to \
+[rust-lang/compiler-builtins](https://github.com/rust-lang/compiler-builtins) \
+instead.
+"""
+cc = ["@tgross35"]
+
 [mentions."library/core/src/intrinsics/simd.rs"]
 message = """
 Some changes occurred to the platform-builtins intrinsics. Make sure the
@@ -887,6 +918,7 @@ message = "Some changes occurred in HTML/CSS/JS."
 cc = [
     "@GuillaumeGomez",
     "@jsha",
+    "@lolbinarycat",
 ]
 
 [mentions."tests/rustdoc-gui/"]
@@ -1168,12 +1200,6 @@ cc = ["@m-ou-se"]
 [assign]
 warn_non_default_branch.enable = true
 contributing_url = "https://rustc-dev-guide.rust-lang.org/getting-started.html"
-users_on_vacation = [
-    "fmease",
-    "jyn514",
-    "Noratrieb",
-    "spastorino",
-]
 
 [[assign.warn_non_default_branch.exceptions]]
 title = "[beta"
@@ -1192,35 +1218,28 @@ compiler = [
     "@BoxyUwU",
     "@compiler-errors",
     "@davidtwco",
+    "@eholk",
     "@fee1-dead",
     "@fmease",
     "@jieyouxu",
+    "@jdonszelmann",
     "@lcnr",
     "@Nadrieril",
     "@nnethercote",
-    "@Noratrieb",
     "@oli-obk",
     "@petrochenkov",
     "@SparrowLii",
+    "@WaffleLapkin",
     "@wesleywiser",
 ]
 libs = [
     "@Mark-Simulacrum",
-    "@Noratrieb",
     "@workingjubilee",
     "@joboet",
     "@jhpratt",
     "@tgross35",
     "@thomcc",
     "@ibraheemdev",
-]
-bootstrap = [
-    "@Mark-Simulacrum",
-    "@albertlarsan68",
-    "@onur-ozkan",
-    "@kobzol",
-    "@jieyouxu",
-    "@clubby789",
 ]
 infra-ci = [
     "@Mark-Simulacrum",
@@ -1241,6 +1260,7 @@ codegen = [
     "@dianqk",
     "@saethlin",
     "@workingjubilee",
+    "@WaffleLapkin",
 ]
 query-system = [
     "@oli-obk",
@@ -1410,11 +1430,13 @@ compiletest = [
 "/src/tools/rustdoc-themes" =                            ["rustdoc"]
 "/src/tools/tidy" =                                      ["bootstrap"]
 "/src/tools/x" =                                         ["bootstrap"]
-"/src/tools/rustdoc-gui-test" =                          ["bootstrap", "@onur-ozkan"]
-"/src/tools/libcxx-version" =                            ["@onur-ozkan"]
+"/src/tools/rustdoc-gui-test" =                          ["bootstrap"]
+"/src/tools/libcxx-version" =                            ["bootstrap"]
 
-# Enable tracking of PR review assignment
-# Documentation at: https://forge.rust-lang.org/triagebot/pr-assignment-tracking.html
+# Enable review queue tracking
+# Documentation at: https://forge.rust-lang.org/triagebot/review-queue-tracking.html
+[assign.review_prefs]
+
 [pr-tracking]
 
 # Enable issue transfers within the org
@@ -1424,3 +1446,20 @@ compiletest = [
 # Enable `@rustbot note` functionality
 # Documentation at: https://forge.rust-lang.org/triagebot/note.html
 [note]
+
+[behind-upstream]
+days-threshold = 14
+
+# Canonicalize issue numbers to avoid closing the wrong issue
+# when commits are included in subtrees, as well as warning links in commits.
+# Documentation at: https://forge.rust-lang.org/triagebot/issue-links.html
+[issue-links]
+
+# Prevents mentions in commits to avoid users being spammed
+# Documentation at: https://forge.rust-lang.org/triagebot/no-mentions.html
+[no-mentions]
+
+# Allow members to formally register concerns (`@rustbot concern my concern`)
+# Documentation at: https://forge.rust-lang.org/triagebot/concern.html
+[concern]
+labels = ["S-waiting-on-concerns"]

@@ -1,4 +1,4 @@
-use rustc_attr_parsing::InstructionSetAttr;
+use rustc_attr_data_structures::InstructionSetAttr;
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_data_structures::unord::{UnordMap, UnordSet};
 use rustc_errors::Applicability;
@@ -8,6 +8,8 @@ use rustc_hir::def_id::{DefId, LOCAL_CRATE, LocalDefId};
 use rustc_middle::middle::codegen_fn_attrs::TargetFeature;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::TyCtxt;
+use rustc_session::features::StabilityExt;
+use rustc_session::lint::builtin::AARCH64_SOFTFLOAT_NEON;
 use rustc_session::parse::feature_err;
 use rustc_span::{Span, Symbol, sym};
 use rustc_target::target_features::{self, Stability};
@@ -18,6 +20,7 @@ use crate::errors;
 /// Enabled target features are added to `target_features`.
 pub(crate) fn from_target_feature_attr(
     tcx: TyCtxt<'_>,
+    did: LocalDefId,
     attr: &hir::Attribute,
     rust_target_features: &UnordMap<String, target_features::Stability>,
     target_features: &mut Vec<TargetFeature>,
@@ -64,7 +67,7 @@ pub(crate) fn from_target_feature_attr(
 
             // Only allow target features whose feature gates have been enabled
             // and which are permitted to be toggled.
-            if let Err(reason) = stability.toggle_allowed() {
+            if let Err(reason) = stability.is_toggle_permitted(tcx.sess) {
                 tcx.dcx().emit_err(errors::ForbiddenTargetFeatureAttr {
                     span: item.span(),
                     feature,
@@ -92,11 +95,22 @@ pub(crate) fn from_target_feature_attr(
                     // generating code so "it's fine".
                     if !tcx.sess.opts.actually_rustdoc {
                         if abi_feature_constraints.incompatible.contains(&name.as_str()) {
-                            tcx.dcx().emit_err(errors::ForbiddenTargetFeatureAttr {
-                                span: item.span(),
-                                feature: name.as_str(),
-                                reason: "this feature is incompatible with the target ABI",
-                            });
+                            // For "neon" specifically, we emit an FCW instead of a hard error.
+                            // See <https://github.com/rust-lang/rust/issues/134375>.
+                            if tcx.sess.target.arch == "aarch64" && name.as_str() == "neon" {
+                                tcx.emit_node_span_lint(
+                                    AARCH64_SOFTFLOAT_NEON,
+                                    tcx.local_def_id_to_hir_id(did),
+                                    item.span(),
+                                    errors::Aarch64SoftfloatNeon,
+                                );
+                            } else {
+                                tcx.dcx().emit_err(errors::ForbiddenTargetFeatureAttr {
+                                    span: item.span(),
+                                    feature: name.as_str(),
+                                    reason: "this feature is incompatible with the target ABI",
+                                });
+                            }
                         }
                     }
                     target_features.push(TargetFeature { name, implied: name != feature_sym })

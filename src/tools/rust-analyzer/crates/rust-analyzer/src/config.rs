@@ -149,6 +149,8 @@ config_data! {
         hover_memoryLayout_niches: Option<bool> = Some(false),
         /// How to render the offset information in a memory layout hover.
         hover_memoryLayout_offset: Option<MemoryLayoutHoverRenderKindDef> = Some(MemoryLayoutHoverRenderKindDef::Hexadecimal),
+        /// How to render the padding information in a memory layout hover.
+        hover_memoryLayout_padding: Option<MemoryLayoutHoverRenderKindDef> = None,
         /// How to render the size information in a memory layout hover.
         hover_memoryLayout_size: Option<MemoryLayoutHoverRenderKindDef> = Some(MemoryLayoutHoverRenderKindDef::Both),
 
@@ -544,7 +546,7 @@ config_data! {
          /// Whether to prefer import paths containing a `prelude` module.
         imports_preferPrelude: bool                       = false,
         /// The path structure for newly inserted paths to use.
-        imports_prefix: ImportPrefixDef               = ImportPrefixDef::Plain,
+        imports_prefix: ImportPrefixDef               = ImportPrefixDef::ByCrate,
         /// Whether to prefix external (including std, core) crate imports with `::`. e.g. "use ::std::io::Read;".
         imports_prefixExternPrelude: bool = false,
     }
@@ -1190,7 +1192,7 @@ impl ConfigChange {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum LinkedProject {
     ProjectManifest(ProjectManifest),
-    InlineJsonProject(ProjectJson),
+    InlineProjectJson(ProjectJson),
 }
 
 impl From<ProjectManifest> for LinkedProject {
@@ -1201,7 +1203,7 @@ impl From<ProjectManifest> for LinkedProject {
 
 impl From<ProjectJson> for LinkedProject {
     fn from(v: ProjectJson) -> Self {
-        LinkedProject::InlineJsonProject(v)
+        LinkedProject::InlineProjectJson(v)
     }
 }
 
@@ -1595,6 +1597,16 @@ impl Config {
             term_search_borrowck: self.assist_termSearch_borrowcheck(source_root).to_owned(),
         }
     }
+
+    pub fn diagnostic_fixes(&self, source_root: Option<SourceRootId>) -> DiagnosticsConfig {
+        // We always want to show quickfixes for diagnostics, even when diagnostics/experimental diagnostics are disabled.
+        DiagnosticsConfig {
+            enabled: true,
+            disable_experimental: false,
+            ..self.diagnostics(source_root)
+        }
+    }
+
     pub fn expand_proc_attr_macros(&self) -> bool {
         self.procMacro_enable().to_owned() && self.procMacro_attributes_enable().to_owned()
     }
@@ -1635,6 +1647,7 @@ impl Config {
                 size: self.hover_memoryLayout_size().map(mem_kind),
                 offset: self.hover_memoryLayout_offset().map(mem_kind),
                 alignment: self.hover_memoryLayout_alignment().map(mem_kind),
+                padding: self.hover_memoryLayout_padding().map(mem_kind),
                 niches: self.hover_memoryLayout_niches().unwrap_or_default(),
             }),
             documentation: self.hover_documentation_enable().to_owned(),

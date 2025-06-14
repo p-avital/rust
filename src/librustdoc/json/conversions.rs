@@ -6,7 +6,7 @@
 
 use rustc_abi::ExternAbi;
 use rustc_ast::ast;
-use rustc_attr_parsing::DeprecatedSince;
+use rustc_attr_data_structures::{self as attrs, DeprecatedSince};
 use rustc_hir::def::CtorKind;
 use rustc_hir::def_id::DefId;
 use rustc_metadata::rendered_const;
@@ -40,7 +40,7 @@ impl JsonRenderer<'_> {
             })
             .collect();
         let docs = item.opt_doc_value();
-        let attrs = item.attributes(self.tcx, self.cache(), true);
+        let attrs = item.attributes_and_repr(self.tcx, self.cache(), true);
         let span = item.span(self.tcx);
         let visibility = item.visibility(self.tcx);
         let clean::ItemInner { name, item_id, .. } = *item.inner;
@@ -153,8 +153,8 @@ where
     }
 }
 
-pub(crate) fn from_deprecation(deprecation: rustc_attr_parsing::Deprecation) -> Deprecation {
-    let rustc_attr_parsing::Deprecation { since, note, suggestion: _ } = deprecation;
+pub(crate) fn from_deprecation(deprecation: attrs::Deprecation) -> Deprecation {
+    let attrs::Deprecation { since, note, suggestion: _ } = deprecation;
     let since = match since {
         DeprecatedSince::RustcVersion(version) => Some(version.to_string()),
         DeprecatedSince::Future => Some("TBD".to_owned()),
@@ -468,6 +468,9 @@ impl FromClean<clean::WherePredicate> for WherePredicate {
                     .collect(),
             },
             EqPredicate { lhs, rhs } => WherePredicate::EqPredicate {
+                // The LHS currently has type `Type` but it should be a `QualifiedPath` since it may
+                // refer to an associated const. However, `EqPredicate` shouldn't exist in the first
+                // place: <https://github.com/rust-lang/rust/141368>.
                 lhs: lhs.into_json(renderer),
                 rhs: rhs.into_json(renderer),
             },
@@ -557,12 +560,7 @@ impl FromClean<clean::Type> for Type {
                 is_mutable: mutability == ast::Mutability::Mut,
                 type_: Box::new((*type_).into_json(renderer)),
             },
-            QPath(box clean::QPathData { assoc, self_type, trait_, .. }) => Type::QualifiedPath {
-                name: assoc.name.to_string(),
-                args: Box::new(assoc.args.into_json(renderer)),
-                self_type: Box::new(self_type.into_json(renderer)),
-                trait_: trait_.map(|trait_| trait_.into_json(renderer)),
-            },
+            QPath(qpath) => (*qpath).into_json(renderer),
             // FIXME(unsafe_binder): Implement rustdoc-json.
             UnsafeBinder(_) => todo!(),
         }
@@ -575,6 +573,19 @@ impl FromClean<clean::Path> for Path {
             path: path.whole_name(),
             id: renderer.id_from_item_default(path.def_id().into()),
             args: path.segments.last().map(|args| Box::new(args.clone().args.into_json(renderer))),
+        }
+    }
+}
+
+impl FromClean<clean::QPathData> for Type {
+    fn from_clean(qpath: clean::QPathData, renderer: &JsonRenderer<'_>) -> Self {
+        let clean::QPathData { assoc, self_type, should_fully_qualify: _, trait_ } = qpath;
+
+        Self::QualifiedPath {
+            name: assoc.name.to_string(),
+            args: Box::new(assoc.args.into_json(renderer)),
+            self_type: Box::new(self_type.into_json(renderer)),
+            trait_: trait_.map(|trait_| trait_.into_json(renderer)),
         }
     }
 }
