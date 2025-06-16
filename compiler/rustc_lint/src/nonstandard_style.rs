@@ -1,5 +1,6 @@
 use rustc_abi::ExternAbi;
-use rustc_attr_parsing::{AttributeKind, AttributeParser, ReprAttr};
+use rustc_attr_data_structures::{AttributeKind, ReprAttr};
+use rustc_attr_parsing::AttributeParser;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::intravisit::FnKind;
 use rustc_hir::{AttrArgs, AttrItem, Attribute, GenericParamKind, PatExprKind, PatKind};
@@ -163,7 +164,7 @@ impl NonCamelCaseTypes {
 impl EarlyLintPass for NonCamelCaseTypes {
     fn check_item(&mut self, cx: &EarlyContext<'_>, it: &ast::Item) {
         let has_repr_c = matches!(
-            AttributeParser::parse_limited(cx.sess(), &it.attrs, sym::repr, it.span, true),
+            AttributeParser::parse_limited(cx.sess(), &it.attrs, sym::repr, it.span, it.id),
             Some(Attribute::Parsed(AttributeKind::Repr(r))) if r.iter().any(|(r, _)| r == &ReprAttr::ReprC)
         );
 
@@ -512,7 +513,7 @@ impl<'tcx> LateLintPass<'tcx> for NonUpperCaseGlobals {
     fn check_item(&mut self, cx: &LateContext<'_>, it: &hir::Item<'_>) {
         let attrs = cx.tcx.hir_attrs(it.hir_id());
         match it.kind {
-            hir::ItemKind::Static(ident, ..)
+            hir::ItemKind::Static(_, ident, ..)
                 if !ast::attr::contains_name(attrs, sym::no_mangle) =>
             {
                 NonUpperCaseGlobals::check_upper_case(cx, "static variable", &ident);

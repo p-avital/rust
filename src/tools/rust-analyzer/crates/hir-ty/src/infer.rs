@@ -35,7 +35,8 @@ use chalk_ir::{
 use either::Either;
 use hir_def::{
     AdtId, AssocItemId, ConstId, DefWithBodyId, FieldId, FunctionId, GenericDefId, GenericParamId,
-    ImplId, ItemContainerId, Lookup, TraitId, TupleFieldId, TupleId, TypeAliasId, VariantId,
+    ImplId, ItemContainerId, LocalFieldId, Lookup, TraitId, TupleFieldId, TupleId, TypeAliasId,
+    VariantId,
     builtin_type::{BuiltinInt, BuiltinType, BuiltinUint},
     expr_store::{Body, ExpressionStore, HygieneId, path::Path},
     hir::{BindingAnnotation, BindingId, ExprId, ExprOrPatId, LabelId, PatId},
@@ -135,6 +136,10 @@ pub(crate) fn infer_query(db: &dyn HirDatabase, def: DefWithBodyId) -> Arc<Infer
     Arc::new(ctx.resolve_all())
 }
 
+pub(crate) fn infer_cycle_result(_: &dyn HirDatabase, _: DefWithBodyId) -> Arc<InferenceResult> {
+    Arc::new(InferenceResult { has_errors: true, ..Default::default() })
+}
+
 /// Fully normalize all the types found within `ty` in context of `owner` body definition.
 ///
 /// This is appropriate to use only after type-check: it assumes
@@ -203,7 +208,7 @@ pub(crate) type InferResult<T> = Result<InferOk<T>, TypeError>;
 pub enum InferenceDiagnostic {
     NoSuchField {
         field: ExprOrPatId,
-        private: bool,
+        private: Option<LocalFieldId>,
         variant: VariantId,
     },
     PrivateField {
@@ -558,6 +563,9 @@ impl InferenceResult {
             ExprOrPatId::PatId(id) => self.type_of_pat.get(id),
         }
     }
+    pub fn is_erroneous(&self) -> bool {
+        self.has_errors && self.type_of_expr.iter().count() == 0
+    }
 }
 
 impl Index<ExprId> for InferenceResult {
@@ -594,16 +602,16 @@ impl Index<BindingId> for InferenceResult {
 
 /// The inference context contains all information needed during type inference.
 #[derive(Clone, Debug)]
-pub(crate) struct InferenceContext<'a> {
-    pub(crate) db: &'a dyn HirDatabase,
+pub(crate) struct InferenceContext<'db> {
+    pub(crate) db: &'db dyn HirDatabase,
     pub(crate) owner: DefWithBodyId,
-    pub(crate) body: &'a Body,
+    pub(crate) body: &'db Body,
     /// Generally you should not resolve things via this resolver. Instead create a TyLoweringContext
     /// and resolve the path via its methods. This will ensure proper error reporting.
-    pub(crate) resolver: Resolver,
+    pub(crate) resolver: Resolver<'db>,
     generic_def: GenericDefId,
     generics: OnceCell<Generics>,
-    table: unify::InferenceTable<'a>,
+    table: unify::InferenceTable<'db>,
     /// The traits in scope, disregarding block modules. This is used for caching purposes.
     traits_in_scope: FxHashSet<TraitId>,
     pub(crate) result: InferenceResult,
@@ -695,12 +703,12 @@ enum ImplTraitReplacingMode {
     TypeAlias,
 }
 
-impl<'a> InferenceContext<'a> {
+impl<'db> InferenceContext<'db> {
     fn new(
-        db: &'a dyn HirDatabase,
+        db: &'db dyn HirDatabase,
         owner: DefWithBodyId,
-        body: &'a Body,
-        resolver: Resolver,
+        body: &'db Body,
+        resolver: Resolver<'db>,
     ) -> Self {
         let trait_env = db.trait_environment_for_body(owner);
         InferenceContext {

@@ -44,10 +44,10 @@ pub trait DerivedTypeCodegenMethods<'tcx>:
     BaseTypeCodegenMethods + MiscCodegenMethods<'tcx> + HasTyCtxt<'tcx> + HasTypingEnv<'tcx>
 {
     fn type_int(&self) -> Self::Type {
-        match &self.sess().target.c_int_width[..] {
-            "16" => self.type_i16(),
-            "32" => self.type_i32(),
-            "64" => self.type_i64(),
+        match &self.sess().target.c_int_width {
+            16 => self.type_i16(),
+            32 => self.type_i32(),
+            64 => self.type_i64(),
             width => bug!("Unsupported c_int_width: {}", width),
         }
     }
@@ -158,7 +158,6 @@ pub trait ArgAbiBuilderMethods<'tcx>: BackendTypes {
         val: Self::Value,
         dst: PlaceRef<'tcx, Self::Value>,
     );
-    fn arg_memory_ty(&self, arg_abi: &ArgAbi<'tcx, Ty<'tcx>>) -> Self::Type;
 }
 
 pub trait TypeCodegenMethods<'tcx> = DerivedTypeCodegenMethods<'tcx>

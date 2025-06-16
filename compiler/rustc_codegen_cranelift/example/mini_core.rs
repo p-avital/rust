@@ -521,8 +521,26 @@ fn panic_cannot_unwind() -> ! {
 }
 
 #[lang = "eh_personality"]
-fn eh_personality() -> ! {
+// FIXME personality signature depends on target
+fn eh_personality(
+    _version: i32,
+    _actions: i32,
+    _exception_class: u64,
+    _exception_object: *mut (),
+    _context: *mut (),
+) -> i32 {
     loop {}
+}
+
+#[lang = "panic_in_cleanup"]
+fn panic_in_cleanup() -> ! {
+    loop {}
+}
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+#[link(name = "gcc_s")]
+extern "C" {
+    fn _Unwind_Resume(exc: *mut ()) -> !;
 }
 
 #[lang = "drop_in_place"]
@@ -626,9 +644,9 @@ pub mod intrinsics {
     #[rustc_intrinsic]
     pub unsafe fn size_of_val<T: ?::Sized>(val: *const T) -> usize;
     #[rustc_intrinsic]
-    pub fn min_align_of<T>() -> usize;
+    pub fn align_of<T>() -> usize;
     #[rustc_intrinsic]
-    pub unsafe fn min_align_of_val<T: ?::Sized>(val: *const T) -> usize;
+    pub unsafe fn align_of_val<T: ?::Sized>(val: *const T) -> usize;
     #[rustc_intrinsic]
     pub unsafe fn copy<T>(src: *const T, dst: *mut T, count: usize);
     #[rustc_intrinsic]

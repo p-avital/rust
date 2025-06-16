@@ -1,6 +1,5 @@
 // tidy-alphabetical-start
 #![allow(internal_features)]
-#![cfg_attr(bootstrap, feature(let_chains))]
 #![feature(default_field_values)]
 #![feature(iter_intersperse)]
 #![feature(rustc_attrs)]
@@ -30,6 +29,7 @@ pub use session::*;
 pub mod output;
 
 pub use getopts;
+pub mod features;
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 

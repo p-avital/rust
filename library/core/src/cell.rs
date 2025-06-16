@@ -495,7 +495,7 @@ impl<T> Cell<T> {
     /// ```
     #[inline]
     #[stable(feature = "move_cell", since = "1.17.0")]
-    #[rustc_const_stable(feature = "const_cell", since = "CURRENT_RUSTC_VERSION")]
+    #[rustc_const_stable(feature = "const_cell", since = "1.88.0")]
     #[rustc_confusables("swap")]
     pub const fn replace(&self, val: T) -> T {
         // SAFETY: This can cause data races if called from a separate thread,
@@ -537,7 +537,7 @@ impl<T: Copy> Cell<T> {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_const_stable(feature = "const_cell", since = "CURRENT_RUSTC_VERSION")]
+    #[rustc_const_stable(feature = "const_cell", since = "1.88.0")]
     pub const fn get(&self) -> T {
         // SAFETY: This can cause data races if called from a separate thread,
         // but `Cell` is `!Sync` so this won't happen.
@@ -556,7 +556,7 @@ impl<T: Copy> Cell<T> {
     /// assert_eq!(c.get(), 6);
     /// ```
     #[inline]
-    #[stable(feature = "cell_update", since = "CURRENT_RUSTC_VERSION")]
+    #[stable(feature = "cell_update", since = "1.88.0")]
     pub fn update(&self, f: impl FnOnce(T) -> T) {
         let old = self.get();
         self.set(f(old));
@@ -608,7 +608,7 @@ impl<T: ?Sized> Cell<T> {
     /// ```
     #[inline]
     #[stable(feature = "cell_get_mut", since = "1.11.0")]
-    #[rustc_const_stable(feature = "const_cell", since = "CURRENT_RUSTC_VERSION")]
+    #[rustc_const_stable(feature = "const_cell", since = "1.88.0")]
     pub const fn get_mut(&mut self) -> &mut T {
         self.value.get_mut()
     }
@@ -628,7 +628,7 @@ impl<T: ?Sized> Cell<T> {
     /// ```
     #[inline]
     #[stable(feature = "as_cell", since = "1.37.0")]
-    #[rustc_const_stable(feature = "const_cell", since = "CURRENT_RUSTC_VERSION")]
+    #[rustc_const_stable(feature = "const_cell", since = "1.88.0")]
     pub const fn from_mut(t: &mut T) -> &Cell<T> {
         // SAFETY: `&mut` ensures unique access.
         unsafe { &*(t as *mut T as *const Cell<T>) }
@@ -686,7 +686,7 @@ impl<T> Cell<[T]> {
     /// assert_eq!(slice_cell.len(), 3);
     /// ```
     #[stable(feature = "as_cell", since = "1.37.0")]
-    #[rustc_const_stable(feature = "const_cell", since = "CURRENT_RUSTC_VERSION")]
+    #[rustc_const_stable(feature = "const_cell", since = "1.88.0")]
     pub const fn as_slice_of_cells(&self) -> &[Cell<T>] {
         // SAFETY: `Cell<T>` has the same memory layout as `T`.
         unsafe { &*(self as *const Cell<[T]> as *const [Cell<T>]) }
@@ -1914,6 +1914,8 @@ impl<T: ?Sized + fmt::Display> fmt::Display for RefMut<'_, T> {
 /// [`.get()`]: `UnsafeCell::get`
 /// [concurrent memory model]: ../sync/atomic/index.html#memory-model-for-atomic-accesses
 ///
+/// # Aliasing rules
+///
 /// The precise Rust aliasing rules are somewhat in flux, but the main points are not contentious:
 ///
 /// - If you create a safe reference with lifetime `'a` (either a `&T` or `&mut T` reference), then
@@ -2167,10 +2169,9 @@ impl<T: ?Sized> UnsafeCell<T> {
 
     /// Gets a mutable pointer to the wrapped value.
     ///
-    /// This can be cast to a pointer of any kind.
-    /// Ensure that the access is unique (no active references, mutable or not)
-    /// when casting to `&mut T`, and ensure that there are no mutations
-    /// or mutable aliases going on when casting to `&T`
+    /// This can be cast to a pointer of any kind. When creating references, you must uphold the
+    /// aliasing rules; see [the type-level docs][UnsafeCell#aliasing-rules] for more discussion and
+    /// caveats.
     ///
     /// # Examples
     ///
@@ -2219,10 +2220,9 @@ impl<T: ?Sized> UnsafeCell<T> {
     /// The difference from [`get`] is that this function accepts a raw pointer,
     /// which is useful to avoid the creation of temporary references.
     ///
-    /// The result can be cast to a pointer of any kind.
-    /// Ensure that the access is unique (no active references, mutable or not)
-    /// when casting to `&mut T`, and ensure that there are no mutations
-    /// or mutable aliases going on when casting to `&T`.
+    /// This can be cast to a pointer of any kind. When creating references, you must uphold the
+    /// aliasing rules; see [the type-level docs][UnsafeCell#aliasing-rules] for more discussion and
+    /// caveats.
     ///
     /// [`get`]: UnsafeCell::get()
     ///

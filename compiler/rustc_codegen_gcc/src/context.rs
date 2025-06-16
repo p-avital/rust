@@ -19,9 +19,7 @@ use rustc_middle::ty::{self, ExistentialTraitRef, Instance, Ty, TyCtxt};
 use rustc_session::Session;
 use rustc_span::source_map::respan;
 use rustc_span::{DUMMY_SP, Span};
-use rustc_target::spec::{
-    HasTargetSpec, HasWasmCAbiOpt, HasX86AbiOpt, Target, TlsModel, WasmCAbi, X86Abi,
-};
+use rustc_target::spec::{HasTargetSpec, HasX86AbiOpt, Target, TlsModel, X86Abi};
 
 #[cfg(feature = "master")]
 use crate::abi::conv_to_fn_attribute;
@@ -470,10 +468,6 @@ impl<'gcc, 'tcx> MiscCodegenMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
         self.tcx.sess
     }
 
-    fn codegen_unit(&self) -> &'tcx CodegenUnit<'tcx> {
-        self.codegen_unit
-    }
-
     fn set_frame_pointer_type(&self, _llfn: RValue<'gcc>) {
         // TODO(antoyo)
     }
@@ -513,12 +507,6 @@ impl<'gcc, 'tcx> HasDataLayout for CodegenCx<'gcc, 'tcx> {
 impl<'gcc, 'tcx> HasTargetSpec for CodegenCx<'gcc, 'tcx> {
     fn target_spec(&self) -> &Target {
         &self.tcx.sess.target
-    }
-}
-
-impl<'gcc, 'tcx> HasWasmCAbiOpt for CodegenCx<'gcc, 'tcx> {
-    fn wasm_c_abi_opt(&self) -> WasmCAbi {
-        self.tcx.sess.opts.unstable_opts.wasm_c_abi
     }
 }
 

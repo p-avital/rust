@@ -130,7 +130,7 @@ pub fn is_debug_info(name: &str) -> bool {
 /// Returns the corresponding relative library directory that the compiler's
 /// dylibs will be found in.
 pub fn libdir(target: TargetSelection) -> &'static str {
-    if target.is_windows() { "bin" } else { "lib" }
+    if target.is_windows() || target.contains("cygwin") { "bin" } else { "lib" }
 }
 
 /// Adds a list of lookup paths to `cmd`'s dynamic library lookup path.
@@ -270,24 +270,6 @@ pub fn is_valid_test_suite_arg<'a, P: AsRef<Path>>(
     }
 }
 
-// FIXME: get rid of this function
-pub fn check_run(cmd: &mut BootstrapCommand, print_cmd_on_fail: bool) -> bool {
-    let status = match cmd.as_command_mut().status() {
-        Ok(status) => status,
-        Err(e) => {
-            println!("failed to execute command: {cmd:?}\nERROR: {e}");
-            return false;
-        }
-    };
-    if !status.success() && print_cmd_on_fail {
-        println!(
-            "\n\ncommand did not execute successfully: {cmd:?}\n\
-             expected success, got: {status}\n\n"
-        );
-    }
-    status.success()
-}
-
 pub fn make(host: &str) -> PathBuf {
     if host.contains("dragonfly")
         || host.contains("freebsd")
@@ -300,25 +282,6 @@ pub fn make(host: &str) -> PathBuf {
     }
 }
 
-#[track_caller]
-pub fn output(cmd: &mut Command) -> String {
-    #[cfg(feature = "tracing")]
-    let _run_span = crate::trace_cmd!(cmd);
-
-    let output = match cmd.stderr(Stdio::inherit()).output() {
-        Ok(status) => status,
-        Err(e) => fail(&format!("failed to execute command: {cmd:?}\nERROR: {e}")),
-    };
-    if !output.status.success() {
-        panic!(
-            "command did not execute successfully: {:?}\n\
-             expected success, got: {}",
-            cmd, output.status
-        );
-    }
-    String::from_utf8(output.stdout).unwrap()
-}
-
 /// Spawn a process and return a closure that will wait for the process
 /// to finish and then return its output. This allows the spawned process
 /// to do work without immediately blocking bootstrap.
@@ -329,7 +292,7 @@ pub fn start_process(cmd: &mut Command) -> impl FnOnce() -> String + use<> {
         Err(e) => fail(&format!("failed to execute command: {cmd:?}\nERROR: {e}")),
     };
 
-    let command = format!("{:?}", cmd);
+    let command = format!("{cmd:?}");
 
     move || {
         let output = child.wait_with_output().unwrap();
@@ -540,7 +503,7 @@ where
     use std::fmt::Write;
 
     input.as_ref().iter().fold(String::with_capacity(input.as_ref().len() * 2), |mut acc, &byte| {
-        write!(&mut acc, "{:02x}", byte).expect("Failed to write byte to the hex String.");
+        write!(&mut acc, "{byte:02x}").expect("Failed to write byte to the hex String.");
         acc
     })
 }

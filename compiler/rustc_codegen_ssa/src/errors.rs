@@ -778,12 +778,6 @@ pub(crate) struct MultipleMainFunctions {
 }
 
 #[derive(Diagnostic)]
-#[diag(codegen_ssa_metadata_object_file_write)]
-pub(crate) struct MetadataObjectFileWrite {
-    pub error: Error,
-}
-
-#[derive(Diagnostic)]
 #[diag(codegen_ssa_invalid_windows_subsystem)]
 pub(crate) struct InvalidWindowsSubsystem {
     pub subsystem: Symbol,
@@ -795,22 +789,6 @@ pub(crate) struct ShuffleIndicesEvaluation {
     #[primary_span]
     pub span: Span,
 }
-
-#[derive(Diagnostic)]
-#[diag(codegen_ssa_missing_memory_ordering)]
-pub(crate) struct MissingMemoryOrdering;
-
-#[derive(Diagnostic)]
-#[diag(codegen_ssa_unknown_atomic_ordering)]
-pub(crate) struct UnknownAtomicOrdering;
-
-#[derive(Diagnostic)]
-#[diag(codegen_ssa_atomic_compare_exchange)]
-pub(crate) struct AtomicCompareExchange;
-
-#[derive(Diagnostic)]
-#[diag(codegen_ssa_unknown_atomic_operation)]
-pub(crate) struct UnknownAtomicOperation;
 
 #[derive(Diagnostic)]
 pub enum InvalidMonomorphization<'tcx> {
@@ -1316,3 +1294,7 @@ pub(crate) struct XcrunSdkPathWarning {
     pub sdk_name: &'static str,
     pub stderr: String,
 }
+
+#[derive(LintDiagnostic)]
+#[diag(codegen_ssa_aarch64_softfloat_neon)]
+pub(crate) struct Aarch64SoftfloatNeon;
