@@ -128,9 +128,7 @@ impl<'a> MutVisitor for TestHarnessGenerator<'a> {
         c.items.push(mk_main(&mut self.cx));
     }
 
-    fn visit_item(&mut self, item: &mut P<ast::Item>) {
-        let item = &mut **item;
-
+    fn visit_item(&mut self, item: &mut ast::Item) {
         if let Some(name) = get_test_name(&item) {
             debug!("this is a test item");
 
@@ -193,7 +191,7 @@ struct EntryPointCleaner<'a> {
 }
 
 impl<'a> MutVisitor for EntryPointCleaner<'a> {
-    fn visit_item(&mut self, item: &mut P<ast::Item>) {
+    fn visit_item(&mut self, item: &mut ast::Item) {
         self.depth += 1;
         ast::mut_visit::walk_item(self, item);
         self.depth -= 1;
@@ -229,7 +227,7 @@ fn generate_test_harness(
     panic_strategy: PanicStrategy,
     test_runner: Option<ast::Path>,
 ) {
-    let econfig = ExpansionConfig::default("test".to_string(), features);
+    let econfig = ExpansionConfig::default(sym::test, features);
     let ext_cx = ExtCtxt::new(sess, econfig, resolver, None);
 
     let expn_id = ext_cx.resolver.expansion_for_ast_pass(

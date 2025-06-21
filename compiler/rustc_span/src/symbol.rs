@@ -34,17 +34,8 @@ symbols! {
         // unnamed method parameters, crate root module, error recovery etc.
         // Matching predicates: `is_special`/`is_reserved`
         //
-        // Notes about `kw::Empty`:
-        // - Its use can blur the lines between "empty symbol" and "no symbol".
-        //   Using `Option<Symbol>` is preferable, where possible, because that
-        //   is unambiguous.
-        // - For dummy symbols that are never used and absolutely must be
-        //   present, it's better to use `sym::dummy` than `kw::Empty`, because
-        //   it's clearer that it's intended as a dummy value, and more likely
-        //   to be detected if it accidentally does get used.
         // tidy-alphabetical-start
         DollarCrate:        "$crate",
-        Empty:              "",
         PathRoot:           "{{root}}",
         Underscore:         "_",
         // tidy-alphabetical-end
@@ -253,6 +244,7 @@ symbols! {
         FnMut,
         FnOnce,
         Formatter,
+        Forward,
         From,
         FromIterator,
         FromResidual,
@@ -280,6 +272,8 @@ symbols! {
         IoSeek,
         IoWrite,
         IpAddr,
+        Ipv4Addr,
+        Ipv6Addr,
         IrTyKind,
         Is,
         Item,
@@ -346,6 +340,7 @@ symbols! {
         Result,
         ResumeTy,
         Return,
+        Reverse,
         Right,
         Rust,
         RustaceansAreAwesome,
@@ -396,14 +391,12 @@ symbols! {
         Wrapping,
         Yield,
         _DECLS,
-        _Self,
         __D,
         __H,
         __S,
         __awaitee,
         __try_var,
-        _d,
-        _e,
+        _t,
         _task_context,
         a32,
         aarch64_target_feature,
@@ -413,6 +406,7 @@ symbols! {
         abi_amdgpu_kernel,
         abi_avr_interrupt,
         abi_c_cmse_nonsecure_call,
+        abi_custom,
         abi_efiapi,
         abi_gpu_kernel,
         abi_msp430_interrupt,
@@ -435,6 +429,8 @@ symbols! {
         aggregate_raw_ptr,
         alias,
         align,
+        align_of,
+        align_of_val,
         alignment,
         all,
         alloc,
@@ -473,6 +469,7 @@ symbols! {
         as_ref,
         as_str,
         asm,
+        asm_cfg,
         asm_const,
         asm_experimental_arch,
         asm_experimental_reg,
@@ -520,7 +517,24 @@ symbols! {
         async_iterator_poll_next,
         async_trait_bounds,
         atomic,
+        atomic_and,
+        atomic_cxchg,
+        atomic_cxchgweak,
+        atomic_fence,
+        atomic_load,
+        atomic_max,
+        atomic_min,
         atomic_mod,
+        atomic_nand,
+        atomic_or,
+        atomic_singlethreadfence,
+        atomic_store,
+        atomic_umax,
+        atomic_umin,
+        atomic_xadd,
+        atomic_xchg,
+        atomic_xor,
+        atomic_xsub,
         atomics,
         att_syntax,
         attr,
@@ -529,7 +543,8 @@ symbols! {
         audit_that,
         augmented_assignments,
         auto_traits,
-        autodiff,
+        autodiff_forward,
+        autodiff_reverse,
         automatically_derived,
         avx,
         avx10_target_feature,
@@ -626,6 +641,7 @@ symbols! {
         cfi_encoding,
         char,
         char_is_ascii,
+        char_to_digit,
         child_id,
         child_kill,
         client,
@@ -862,7 +878,7 @@ symbols! {
         drop_types_in_const,
         dropck_eyepatch,
         dropck_parametricity,
-        dummy: "<!dummy!>", // use this instead of `kw::Empty` for symbols that won't be used
+        dummy: "<!dummy!>", // use this instead of `sym::empty` for symbols that won't be used
         dummy_cgu_name,
         dylib,
         dyn_compatible_for_dispatch,
@@ -881,6 +897,14 @@ symbols! {
         emit_enum_variant_arg,
         emit_struct,
         emit_struct_field,
+        // Notes about `sym::empty`:
+        // - It should only be used when it genuinely means "empty symbol". Use
+        //   `Option<Symbol>` when "no symbol" is a possibility.
+        // - For dummy symbols that are never used and absolutely must be
+        //   present, it's better to use `sym::dummy` than `sym::empty`, because
+        //   it's clearer that it's intended as a dummy value, and more likely
+        //   to be detected if it accidentally does get used.
+        empty: "",
         emscripten_wasm_eh,
         enable,
         encode,
@@ -932,8 +956,10 @@ symbols! {
         external_doc,
         f,
         f128,
+        f128_epsilon,
         f128_nan,
         f16,
+        f16_epsilon,
         f16_nan,
         f16c_target_feature,
         f32,
@@ -1191,6 +1217,8 @@ symbols! {
         intrinsics,
         intrinsics_unaligned_volatile_load,
         intrinsics_unaligned_volatile_store,
+        io_error_new,
+        io_errorkind,
         io_stderr,
         io_stdout,
         irrefutable_let_patterns,
@@ -1280,6 +1308,7 @@ symbols! {
         m68k_target_feature,
         macro_at_most_once_rep,
         macro_attributes_in_derive_output,
+        macro_concat,
         macro_escape,
         macro_export,
         macro_lifetime_matcher,
@@ -1314,6 +1343,7 @@ symbols! {
         maybe_uninit,
         maybe_uninit_uninit,
         maybe_uninit_zeroed,
+        mem_align_of,
         mem_discriminant,
         mem_drop,
         mem_forget,
@@ -1329,9 +1359,8 @@ symbols! {
         memtag,
         message,
         meta,
+        meta_sized,
         metadata_type,
-        min_align_of,
-        min_align_of_val,
         min_const_fn,
         min_const_generics,
         min_const_unsafe_fn,
@@ -1489,6 +1518,7 @@ symbols! {
         offset_of_nested,
         offset_of_slice,
         ok_or_else,
+        old_name,
         omit_gdb_pretty_printer_section,
         on,
         on_unimplemented,
@@ -1588,6 +1618,7 @@ symbols! {
         plugin_registrar,
         plugins,
         pointee,
+        pointee_sized,
         pointee_trait,
         pointer,
         pointer_like,
@@ -1680,6 +1711,7 @@ symbols! {
         question_mark,
         quote,
         range_inclusive_new,
+        range_step,
         raw_dylib,
         raw_dylib_elf,
         raw_eq,
@@ -1991,10 +2023,13 @@ symbols! {
         size_of,
         size_of_val,
         sized,
+        sized_hierarchy,
         skip,
         slice,
         slice_from_raw_parts,
         slice_from_raw_parts_mut,
+        slice_from_ref,
+        slice_get_unchecked,
         slice_into_vec,
         slice_iter,
         slice_len_fn,
@@ -2023,6 +2058,7 @@ symbols! {
         static_recursion,
         staticlib,
         std,
+        std_lib_injection,
         std_panic,
         std_panic_2015_macro,
         std_panic_macro,
@@ -2070,6 +2106,9 @@ symbols! {
         sym,
         sync,
         synthetic,
+        sys_mutex_lock,
+        sys_mutex_try_lock,
+        sys_mutex_unlock,
         t32,
         target,
         target_abi,
@@ -2151,6 +2190,7 @@ symbols! {
         type_changing_struct_update,
         type_const,
         type_id,
+        type_ir,
         type_ir_infer_ctxt_like,
         type_ir_inherent,
         type_ir_interner,
@@ -2261,6 +2301,7 @@ symbols! {
         usize_legacy_fn_max_value,
         usize_legacy_fn_min_value,
         usize_legacy_mod,
+        v1,
         v8plus,
         va_arg,
         va_copy,
@@ -2360,7 +2401,7 @@ impl Ident {
     #[inline]
     /// Constructs a new identifier from a symbol and a span.
     pub fn new(name: Symbol, span: Span) -> Ident {
-        debug_assert_ne!(name, kw::Empty);
+        debug_assert_ne!(name, sym::empty);
         Ident { name, span }
     }
 
@@ -2582,7 +2623,7 @@ impl Symbol {
     }
 
     pub fn is_empty(self) -> bool {
-        self == kw::Empty
+        self == sym::empty
     }
 
     /// This method is supposed to be used in error messages, so it's expected to be
@@ -2590,7 +2631,8 @@ impl Symbol {
     /// (`token_to_string`, `Ident::to_string`), except that symbols don't keep the rawness flag
     /// or edition, so we have to guess the rawness using the global edition.
     pub fn to_ident_string(self) -> String {
-        Ident::with_dummy_span(self).to_string()
+        // Avoid creating an empty identifier, because that asserts in debug builds.
+        if self == sym::empty { String::new() } else { Ident::with_dummy_span(self).to_string() }
     }
 }
 
@@ -2647,7 +2689,7 @@ impl Interner {
         assert_eq!(
             strings.len(),
             init.len() + extra.len(),
-            "`init` or `extra` contain duplicate symbols",
+            "there are duplicate symbols in the rustc symbol list and the extra symbols added by the driver",
         );
         Interner(Lock::new(InternerInner { arena: Default::default(), strings }))
     }
@@ -2770,7 +2812,7 @@ impl Symbol {
 
     /// Returns `true` if this symbol can be a raw identifier.
     pub fn can_be_raw(self) -> bool {
-        self != kw::Empty && self != kw::Underscore && !self.is_path_segment_keyword()
+        self != sym::empty && self != kw::Underscore && !self.is_path_segment_keyword()
     }
 
     /// Was this symbol predefined in the compiler's `symbols!` macro
@@ -2820,7 +2862,7 @@ impl Ident {
     /// Whether this would be the identifier for a tuple field like `self.0`, as
     /// opposed to a named field like `self.thing`.
     pub fn is_numeric(self) -> bool {
-        !self.name.is_empty() && self.as_str().bytes().all(|b| b.is_ascii_digit())
+        self.as_str().bytes().all(|b| b.is_ascii_digit())
     }
 }
 

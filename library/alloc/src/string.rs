@@ -1489,10 +1489,11 @@ impl String {
         Some(ch)
     }
 
-    /// Removes a [`char`] from this `String` at a byte position and returns it.
+    /// Removes a [`char`] from this `String` at byte position `idx` and returns it.
     ///
-    /// This is an *O*(*n*) operation, as it requires copying every element in the
-    /// buffer.
+    /// Copies all bytes after the removed char to new positions.
+    ///
+    /// Note that calling this in a loop can result in quadratic behavior.
     ///
     /// # Panics
     ///
@@ -1678,10 +1679,13 @@ impl String {
         drop(guard);
     }
 
-    /// Inserts a character into this `String` at a byte position.
+    /// Inserts a character into this `String` at byte position `idx`.
     ///
-    /// This is an *O*(*n*) operation as it requires copying every element in the
-    /// buffer.
+    /// Reallocates if `self.capacity()` is insufficient, which may involve copying all
+    /// `self.capacity()` bytes. Makes space for the insertion by copying all bytes of
+    /// `&self[idx..]` to new positions.
+    ///
+    /// Note that calling this in a loop can result in quadratic behavior.
     ///
     /// # Panics
     ///
@@ -1733,10 +1737,13 @@ impl String {
         }
     }
 
-    /// Inserts a string slice into this `String` at a byte position.
+    /// Inserts a string slice into this `String` at byte position `idx`.
     ///
-    /// This is an *O*(*n*) operation as it requires copying every element in the
-    /// buffer.
+    /// Reallocates if `self.capacity()` is insufficient, which may involve copying all
+    /// `self.capacity()` bytes. Makes space for the insertion by copying all bytes of
+    /// `&self[idx..]` to new positions.
+    ///
+    /// Note that calling this in a loop can result in quadratic behavior.
     ///
     /// # Panics
     ///
@@ -1832,7 +1839,7 @@ impl String {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_stable(feature = "const_vec_string_slice", since = "1.87.0")]
     #[rustc_confusables("length", "size")]
-    #[cfg_attr(not(bootstrap), rustc_no_implicit_autorefs)]
+    #[rustc_no_implicit_autorefs]
     pub const fn len(&self) -> usize {
         self.vec.len()
     }
@@ -1852,7 +1859,7 @@ impl String {
     #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_stable(feature = "const_vec_string_slice", since = "1.87.0")]
-    #[cfg_attr(not(bootstrap), rustc_no_implicit_autorefs)]
+    #[rustc_no_implicit_autorefs]
     pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -2826,7 +2833,55 @@ impl SpecToString for bool {
     }
 }
 
+macro_rules! impl_to_string {
+    ($($signed:ident, $unsigned:ident,)*) => {
+        $(
+        #[cfg(not(no_global_oom_handling))]
+        #[cfg(not(feature = "optimize_for_size"))]
+        impl SpecToString for $signed {
+            #[inline]
+            fn spec_to_string(&self) -> String {
+                const SIZE: usize = $signed::MAX.ilog10() as usize + 1;
+                let mut buf = [core::mem::MaybeUninit::<u8>::uninit(); SIZE];
+                // Only difference between signed and unsigned are these 8 lines.
+                let mut out;
+                if *self < 0 {
+                    out = String::with_capacity(SIZE + 1);
+                    out.push('-');
+                } else {
+                    out = String::with_capacity(SIZE);
+                }
+
+                out.push_str(self.unsigned_abs()._fmt(&mut buf));
+                out
+            }
+        }
+        #[cfg(not(no_global_oom_handling))]
+        #[cfg(not(feature = "optimize_for_size"))]
+        impl SpecToString for $unsigned {
+            #[inline]
+            fn spec_to_string(&self) -> String {
+                const SIZE: usize = $unsigned::MAX.ilog10() as usize + 1;
+                let mut buf = [core::mem::MaybeUninit::<u8>::uninit(); SIZE];
+
+                self._fmt(&mut buf).to_string()
+            }
+        }
+        )*
+    }
+}
+
+impl_to_string! {
+    i8, u8,
+    i16, u16,
+    i32, u32,
+    i64, u64,
+    isize, usize,
+    i128, u128,
+}
+
 #[cfg(not(no_global_oom_handling))]
+#[cfg(feature = "optimize_for_size")]
 impl SpecToString for u8 {
     #[inline]
     fn spec_to_string(&self) -> String {
@@ -2846,6 +2901,7 @@ impl SpecToString for u8 {
 }
 
 #[cfg(not(no_global_oom_handling))]
+#[cfg(feature = "optimize_for_size")]
 impl SpecToString for i8 {
     #[inline]
     fn spec_to_string(&self) -> String {

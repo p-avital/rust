@@ -7,19 +7,18 @@ use itertools::Itertools;
 use rustc_abi::FIRST_VARIANT;
 use rustc_ast as ast;
 use rustc_ast::expand::allocator::{ALLOCATOR_METHODS, AllocatorKind, global_fn_name};
-use rustc_attr_parsing::OptimizeAttr;
+use rustc_attr_data_structures::OptimizeAttr;
 use rustc_data_structures::fx::{FxHashMap, FxIndexSet};
 use rustc_data_structures::profiling::{get_resident_set_size, print_time_passes_entry};
 use rustc_data_structures::sync::{IntoDynSyncSend, par_map};
 use rustc_data_structures::unord::UnordMap;
+use rustc_hir::ItemId;
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_hir::lang_items::LangItem;
-use rustc_hir::{ItemId, Target};
-use rustc_metadata::EncodedMetadata;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
 use rustc_middle::middle::debugger_visualizer::{DebuggerVisualizerFile, DebuggerVisualizerType};
-use rustc_middle::middle::exported_symbols::SymbolExportKind;
-use rustc_middle::middle::{exported_symbols, lang_items};
+use rustc_middle::middle::exported_symbols::{self, SymbolExportKind};
+use rustc_middle::middle::lang_items;
 use rustc_middle::mir::BinOp;
 use rustc_middle::mir::interpret::ErrorHandled;
 use rustc_middle::mir::mono::{CodegenUnit, CodegenUnitNameBuilder, MonoItem, MonoItemPartitions};
@@ -28,7 +27,7 @@ use rustc_middle::ty::layout::{HasTyCtxt, HasTypingEnv, LayoutOf, TyAndLayout};
 use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
 use rustc_middle::{bug, span_bug};
 use rustc_session::Session;
-use rustc_session::config::{self, CrateType, EntryFnType, OutputType};
+use rustc_session::config::{self, CrateType, EntryFnType};
 use rustc_span::{DUMMY_SP, Symbol, sym};
 use rustc_symbol_mangling::mangle_internal_symbol;
 use rustc_trait_selection::infer::{BoundRegionConversionTime, TyCtxtInferExt};
@@ -37,7 +36,6 @@ use tracing::{debug, info};
 
 use crate::assert_module_sources::CguReuse;
 use crate::back::link::are_upstream_rust_objects_already_included;
-use crate::back::metadata::create_compressed_metadata_file;
 use crate::back::write::{
     ComputedLtoType, OngoingCodegen, compute_per_cgu_lto_type, start_async_codegen,
     submit_codegened_module_to_llvm, submit_post_lto_module_to_llvm, submit_pre_lto_module_to_llvm,
@@ -48,8 +46,7 @@ use crate::mir::operand::OperandValue;
 use crate::mir::place::PlaceRef;
 use crate::traits::*;
 use crate::{
-    CachedModuleCodegen, CodegenLintLevels, CompiledModule, CrateInfo, ModuleCodegen, ModuleKind,
-    errors, meth, mir,
+    CachedModuleCodegen, CodegenLintLevels, CrateInfo, ModuleCodegen, ModuleKind, errors, meth, mir,
 };
 
 pub(crate) fn bin_op_to_icmp_predicate(op: BinOp, signed: bool) -> IntPredicate {
@@ -492,6 +489,7 @@ where
 /// users main function.
 pub fn maybe_create_entry_wrapper<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     cx: &'a Bx::CodegenCx,
+    cgu: &CodegenUnit<'tcx>,
 ) -> Option<Bx::Function> {
     let (main_def_id, entry_type) = cx.tcx().entry_fn(())?;
     let main_is_local = main_def_id.is_local();
@@ -500,10 +498,10 @@ pub fn maybe_create_entry_wrapper<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     if main_is_local {
         // We want to create the wrapper in the same codegen unit as Rust's main
         // function.
-        if !cx.codegen_unit().contains_item(&MonoItem::Fn(instance)) {
+        if !cgu.contains_item(&MonoItem::Fn(instance)) {
             return None;
         }
-    } else if !cx.codegen_unit().is_primary() {
+    } else if !cgu.is_primary() {
         // We want to create the wrapper only when the codegen unit is the primary one
         return None;
     }
@@ -560,7 +558,7 @@ pub fn maybe_create_entry_wrapper<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
 
         let EntryFnType::Main { sigpipe } = entry_type;
         let (start_fn, start_ty, args, instance) = {
-            let start_def_id = cx.tcx().require_lang_item(LangItem::Start, None);
+            let start_def_id = cx.tcx().require_lang_item(LangItem::Start, DUMMY_SP);
             let start_instance = ty::Instance::expect_resolve(
                 cx.tcx(),
                 cx.typing_env(),
@@ -668,12 +666,10 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
     backend: B,
     tcx: TyCtxt<'_>,
     target_cpu: String,
-    metadata: EncodedMetadata,
-    need_metadata_module: bool,
 ) -> OngoingCodegen<B> {
     // Skip crate items and just output metadata in -Z no-codegen mode.
     if tcx.sess.opts.unstable_opts.no_codegen || !tcx.sess.opts.output_types.should_codegen() {
-        let ongoing_codegen = start_async_codegen(backend, tcx, target_cpu, metadata, None);
+        let ongoing_codegen = start_async_codegen(backend, tcx, target_cpu);
 
         ongoing_codegen.codegen_finished(tcx);
 
@@ -706,39 +702,7 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
         }
     }
 
-    let metadata_module = need_metadata_module.then(|| {
-        // Emit compressed metadata object.
-        let metadata_cgu_name =
-            cgu_name_builder.build_cgu_name(LOCAL_CRATE, &["crate"], Some("metadata")).to_string();
-        tcx.sess.time("write_compressed_metadata", || {
-            let file_name = tcx.output_filenames(()).temp_path_for_cgu(
-                OutputType::Metadata,
-                &metadata_cgu_name,
-                tcx.sess.invocation_temp.as_deref(),
-            );
-            let data = create_compressed_metadata_file(
-                tcx.sess,
-                &metadata,
-                &exported_symbols::metadata_symbol_name(tcx),
-            );
-            if let Err(error) = std::fs::write(&file_name, data) {
-                tcx.dcx().emit_fatal(errors::MetadataObjectFileWrite { error });
-            }
-            CompiledModule {
-                name: metadata_cgu_name,
-                kind: ModuleKind::Metadata,
-                object: Some(file_name),
-                dwarf_object: None,
-                bytecode: None,
-                assembly: None,
-                llvm_ir: None,
-                links_from_incr_cache: Vec::new(),
-            }
-        })
-    });
-
-    let ongoing_codegen =
-        start_async_codegen(backend.clone(), tcx, target_cpu, metadata, metadata_module);
+    let ongoing_codegen = start_async_codegen(backend.clone(), tcx, target_cpu);
 
     // Codegen an allocator shim, if necessary.
     if let Some(kind) = allocator_kind_for_codegen(tcx) {
@@ -1009,6 +973,7 @@ impl CrateInfo {
             windows_subsystem,
             natvis_debugger_visualizers: Default::default(),
             lint_levels: CodegenLintLevels::from_tcx(tcx),
+            metadata_symbol: exported_symbols::metadata_symbol_name(tcx),
         };
 
         info.native_libraries.reserve(n_crates);
@@ -1038,35 +1003,21 @@ impl CrateInfo {
         // by the compiler, but that's ok because all this stuff is unstable anyway.
         let target = &tcx.sess.target;
         if !are_upstream_rust_objects_already_included(tcx.sess) {
-            let add_prefix = match (target.is_like_windows, target.arch.as_ref()) {
-                (true, "x86") => |name: String, _: SymbolExportKind| format!("_{name}"),
-                (true, "arm64ec") => {
-                    // Only functions are decorated for arm64ec.
-                    |name: String, export_kind: SymbolExportKind| match export_kind {
-                        SymbolExportKind::Text => format!("#{name}"),
-                        _ => name,
-                    }
-                }
-                _ => |name: String, _: SymbolExportKind| name,
-            };
-            let missing_weak_lang_items: FxIndexSet<(Symbol, SymbolExportKind)> = info
+            let missing_weak_lang_items: FxIndexSet<Symbol> = info
                 .used_crates
                 .iter()
                 .flat_map(|&cnum| tcx.missing_lang_items(cnum))
                 .filter(|l| l.is_weak())
                 .filter_map(|&l| {
                     let name = l.link_name()?;
-                    let export_kind = match l.target() {
-                        Target::Fn => SymbolExportKind::Text,
-                        Target::Static => SymbolExportKind::Data,
-                        _ => bug!(
-                            "Don't know what the export kind is for lang item of kind {:?}",
-                            l.target()
-                        ),
-                    };
-                    lang_items::required(tcx, l).then_some((name, export_kind))
+                    lang_items::required(tcx, l).then_some(name)
                 })
                 .collect();
+            let prefix = match (target.is_like_windows, target.arch.as_ref()) {
+                (true, "x86") => "_",
+                (true, "arm64ec") => "#",
+                _ => "",
+            };
 
             // This loop only adds new items to values of the hash map, so the order in which we
             // iterate over the values is not important.
@@ -1079,13 +1030,10 @@ impl CrateInfo {
                 .for_each(|(_, linked_symbols)| {
                     let mut symbols = missing_weak_lang_items
                         .iter()
-                        .map(|(item, export_kind)| {
+                        .map(|item| {
                             (
-                                add_prefix(
-                                    mangle_internal_symbol(tcx, item.as_str()),
-                                    *export_kind,
-                                ),
-                                *export_kind,
+                                format!("{prefix}{}", mangle_internal_symbol(tcx, item.as_str())),
+                                SymbolExportKind::Text,
                             )
                         })
                         .collect::<Vec<_>>();
@@ -1100,12 +1048,12 @@ impl CrateInfo {
                         // errors.
                         linked_symbols.extend(ALLOCATOR_METHODS.iter().map(|method| {
                             (
-                                add_prefix(
+                                format!(
+                                    "{prefix}{}",
                                     mangle_internal_symbol(
                                         tcx,
-                                        global_fn_name(method.name).as_str(),
-                                    ),
-                                    SymbolExportKind::Text,
+                                        global_fn_name(method.name).as_str()
+                                    )
                                 ),
                                 SymbolExportKind::Text,
                             )

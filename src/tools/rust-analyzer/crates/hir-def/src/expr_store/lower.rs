@@ -7,12 +7,14 @@ mod path;
 
 use std::mem;
 
+use base_db::FxIndexSet;
 use cfg::CfgOptions;
 use either::Either;
 use hir_expand::{
-    HirFileId, InFile, Lookup, MacroDefId,
+    HirFileId, InFile, Intern, MacroDefId,
     mod_path::tool_path,
     name::{AsName, Name},
+    span_map::SpanMapRef,
 };
 use intern::{Symbol, sym};
 use rustc_hash::FxHashMap;
@@ -30,8 +32,8 @@ use triomphe::Arc;
 use tt::TextRange;
 
 use crate::{
-    AdtId, BlockId, BlockLoc, DefWithBodyId, FunctionId, GenericDefId, ImplId, ItemTreeLoc,
-    MacroId, ModuleDefId, ModuleId, TraitAliasId, TraitId, TypeAliasId, UnresolvedMacro,
+    AdtId, BlockId, BlockLoc, DefWithBodyId, FunctionId, GenericDefId, ImplId, MacroId,
+    ModuleDefId, ModuleId, TraitAliasId, TraitId, TypeAliasId, UnresolvedMacro,
     builtin_type::BuiltinUint,
     db::DefDatabase,
     expr_store::{
@@ -56,7 +58,7 @@ use crate::{
     item_scope::BuiltinShadowMode,
     item_tree::FieldsShape,
     lang_item::LangItem,
-    nameres::{DefMap, LocalDefMap, MacroSubNs},
+    nameres::{DefMap, LocalDefMap, MacroSubNs, block_def_map},
     type_ref::{
         ArrayType, ConstRef, FnType, LifetimeRef, LifetimeRefId, Mutability, PathId, Rawness,
         RefType, TraitBoundModifier, TraitRef, TypeBound, TypeRef, TypeRefId, UseArgRef,
@@ -64,8 +66,6 @@ use crate::{
 };
 
 pub use self::path::hir_segment_to_ast_segment;
-
-type FxIndexSet<K> = indexmap::IndexSet<K, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 
 pub(super) fn lower_body(
     db: &dyn DefDatabase,
@@ -436,8 +436,8 @@ pub struct ExprCollector<'db> {
     db: &'db dyn DefDatabase,
     cfg_options: &'db CfgOptions,
     expander: Expander,
-    def_map: Arc<DefMap>,
-    local_def_map: Arc<LocalDefMap>,
+    def_map: &'db DefMap,
+    local_def_map: &'db LocalDefMap,
     module: ModuleId,
     pub store: ExpressionStoreBuilder,
     pub(crate) source_map: ExpressionStoreSourceMap,
@@ -544,7 +544,7 @@ impl ExprCollector<'_> {
         current_file_id: HirFileId,
     ) -> ExprCollector<'_> {
         let (def_map, local_def_map) = module.local_def_map(db);
-        let expander = Expander::new(db, current_file_id, &def_map);
+        let expander = Expander::new(db, current_file_id, def_map);
         ExprCollector {
             db,
             cfg_options: module.krate().cfg_options(db),
@@ -562,6 +562,11 @@ impl ExprCollector<'_> {
             current_block_legacy_macro_defs_count: FxHashMap::default(),
             outer_impl_trait: false,
         }
+    }
+
+    #[inline]
+    pub(crate) fn span_map(&self) -> SpanMapRef<'_> {
+        self.expander.span_map()
     }
 
     pub fn lower_lifetime_ref(&mut self, lifetime: ast::Lifetime) -> LifetimeRefId {
@@ -1947,7 +1952,7 @@ impl ExprCollector<'_> {
                 let resolver = |path: &_| {
                     self.def_map
                         .resolve_path(
-                            &self.local_def_map,
+                            self.local_def_map,
                             self.db,
                             module,
                             path,
@@ -2141,34 +2146,18 @@ impl ExprCollector<'_> {
         block: ast::BlockExpr,
         mk_block: impl FnOnce(Option<BlockId>, Box<[Statement]>, Option<ExprId>) -> Expr,
     ) -> ExprId {
-        let block_has_items = {
-            let statement_has_item = block.statements().any(|stmt| match stmt {
-                ast::Stmt::Item(_) => true,
-                // Macro calls can be both items and expressions. The syntax library always treats
-                // them as expressions here, so we undo that.
-                ast::Stmt::ExprStmt(es) => matches!(es.expr(), Some(ast::Expr::MacroExpr(_))),
-                _ => false,
-            });
-            statement_has_item
-                || matches!(block.tail_expr(), Some(ast::Expr::MacroExpr(_)))
-                || (block.may_carry_attributes() && block.attrs().next().is_some())
-        };
-
-        let block_id = if block_has_items {
-            let file_local_id = self.expander.ast_id_map().ast_id(&block);
+        let block_id = self.expander.ast_id_map().ast_id_for_block(&block).map(|file_local_id| {
             let ast_id = self.expander.in_file(file_local_id);
-            Some(self.db.intern_block(BlockLoc { ast_id, module: self.module }))
-        } else {
-            None
-        };
+            BlockLoc { ast_id, module: self.module }.intern(self.db)
+        });
 
         let (module, def_map) =
-            match block_id.map(|block_id| (self.db.block_def_map(block_id), block_id)) {
+            match block_id.map(|block_id| (block_def_map(self.db, block_id), block_id)) {
                 Some((def_map, block_id)) => {
                     self.store.block_scopes.push(block_id);
                     (def_map.module_id(DefMap::ROOT), def_map)
                 }
-                None => (self.module, self.def_map.clone()),
+                None => (self.module, self.def_map),
             };
         let prev_def_map = mem::replace(&mut self.def_map, def_map);
         let prev_local_module = mem::replace(&mut self.module, module);
@@ -2247,7 +2236,7 @@ impl ExprCollector<'_> {
                     // This could also be a single-segment path pattern. To
                     // decide that, we need to try resolving the name.
                     let (resolved, _) = self.def_map.resolve_path(
-                        &self.local_def_map,
+                        self.local_def_map,
                         self.db,
                         self.module.local_id,
                         &name.clone().into(),
@@ -2260,11 +2249,8 @@ impl ExprCollector<'_> {
                     match resolved.take_values() {
                         Some(ModuleDefId::ConstId(_)) => (None, Pat::Path(name.into())),
                         Some(ModuleDefId::EnumVariantId(variant))
-                            if {
-                                let loc = variant.lookup(self.db);
-                                let tree = loc.item_tree_id().item_tree(self.db);
-                                tree[loc.id.value].shape != FieldsShape::Record
-                            } =>
+                        // FIXME: This can cause a cycle if the user is writing invalid code
+                            if self.db.variant_fields(variant.into()).shape != FieldsShape::Record =>
                         {
                             (None, Pat::Path(name.into()))
                         }
