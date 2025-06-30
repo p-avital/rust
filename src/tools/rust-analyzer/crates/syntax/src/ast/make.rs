@@ -13,6 +13,7 @@
 
 mod quote;
 
+use either::Either;
 use itertools::Itertools;
 use parser::{Edition, T};
 use rowan::NodeOrToken;
@@ -130,6 +131,13 @@ pub fn name_ref(name_ref: &str) -> ast::NameRef {
     quote! {
         NameRef {
             [IDENT format!("{raw_escape}{name_ref}")]
+        }
+    }
+}
+pub fn name_ref_self_ty() -> ast::NameRef {
+    quote! {
+        NameRef {
+            [Self]
         }
     }
 }
@@ -881,7 +889,7 @@ pub fn match_arm_list(arms: impl IntoIterator<Item = ast::MatchArm>) -> ast::Mat
 }
 
 pub fn where_pred(
-    path: ast::Type,
+    path: Either<ast::Lifetime, ast::Type>,
     bounds: impl IntoIterator<Item = ast::TypeBound>,
 ) -> ast::WherePred {
     let bounds = bounds.into_iter().join(" + ");

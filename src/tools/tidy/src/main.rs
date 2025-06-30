@@ -35,6 +35,7 @@ fn main() {
     let library_path = root_path.join("library");
     let compiler_path = root_path.join("compiler");
     let librustdoc_path = src_path.join("librustdoc");
+    let tools_path = src_path.join("tools");
     let crashes_path = tests_path.join("crashes");
 
     let args: Vec<String> = env::args().skip(1).collect();
@@ -47,7 +48,9 @@ fn main() {
     let extra_checks =
         cfg_args.iter().find(|s| s.starts_with("--extra-checks=")).map(String::as_str);
 
-    let bad = std::sync::Arc::new(AtomicBool::new(false));
+    let mut bad = false;
+    let ci_info = CiInfo::new(&mut bad);
+    let bad = std::sync::Arc::new(AtomicBool::new(bad));
 
     let drain_handles = |handles: &mut VecDeque<ScopedJoinHandle<'_, ()>>| {
         // poll all threads for completion before awaiting the oldest one
@@ -108,11 +111,13 @@ fn main() {
         check!(rustdoc_gui_tests, &tests_path);
         check!(rustdoc_css_themes, &librustdoc_path);
         check!(rustdoc_templates, &librustdoc_path);
+        check!(rustdoc_js, &librustdoc_path, &tools_path, &src_path);
+        check!(rustdoc_json, &src_path, &ci_info);
         check!(known_bug, &crashes_path);
         check!(unknown_revision, &tests_path);
 
         // Checks that only make sense for the compiler.
-        check!(error_codes, &root_path, &[&compiler_path, &librustdoc_path], verbose);
+        check!(error_codes, &root_path, &[&compiler_path, &librustdoc_path], verbose, &ci_info);
         check!(fluent_alphabetical, &compiler_path, bless);
         check!(fluent_period, &compiler_path);
         check!(target_policy, &root_path);

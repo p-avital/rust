@@ -5,7 +5,7 @@ use std::fmt::{self, Debug, Write};
 use std::hash::Hash;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
@@ -15,13 +15,14 @@ use tracing::instrument;
 
 pub use self::cargo::{Cargo, cargo_profile_var};
 pub use crate::Compiler;
+use crate::core::build_steps::compile::{Std, StdLink};
 use crate::core::build_steps::{
     check, clean, clippy, compile, dist, doc, gcc, install, llvm, run, setup, test, tool, vendor,
 };
 use crate::core::config::flags::Subcommand;
 use crate::core::config::{DryRun, TargetSelection};
 use crate::utils::cache::Cache;
-use crate::utils::exec::{BootstrapCommand, command};
+use crate::utils::exec::{BootstrapCommand, ExecutionContext, command};
 use crate::utils::helpers::{self, LldThreads, add_dylib_path, exe, libdir, linker_args, t};
 use crate::{Build, Crate, trace};
 
@@ -59,6 +60,9 @@ pub struct Builder<'a> {
     /// to do. For example: with `./x check foo bar` we get `paths=["foo",
     /// "bar"]`.
     pub paths: Vec<PathBuf>,
+
+    /// Cached list of submodules from self.build.src.
+    submodule_paths_cache: OnceLock<Vec<String>>,
 }
 
 impl Deref for Builder<'_> {
@@ -126,6 +130,54 @@ pub trait Step: 'static + Clone + Debug + PartialEq + Eq + Hash {
         // as such calling them from ./x.py isn't logical.
         unimplemented!()
     }
+
+    /// Returns metadata of the step, for tests
+    fn metadata(&self) -> Option<StepMetadata> {
+        None
+    }
+}
+
+/// Metadata that describes an executed step, mostly for testing and tracing.
+#[allow(unused)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct StepMetadata {
+    name: &'static str,
+    kind: Kind,
+    target: TargetSelection,
+    built_by: Option<Compiler>,
+    stage: Option<u32>,
+}
+
+impl StepMetadata {
+    pub fn build(name: &'static str, target: TargetSelection) -> Self {
+        Self::new(name, target, Kind::Build)
+    }
+
+    pub fn doc(name: &'static str, target: TargetSelection) -> Self {
+        Self::new(name, target, Kind::Doc)
+    }
+
+    pub fn dist(name: &'static str, target: TargetSelection) -> Self {
+        Self::new(name, target, Kind::Dist)
+    }
+
+    pub fn test(name: &'static str, target: TargetSelection) -> Self {
+        Self::new(name, target, Kind::Test)
+    }
+
+    fn new(name: &'static str, target: TargetSelection, kind: Kind) -> Self {
+        Self { name, kind, target, built_by: None, stage: None }
+    }
+
+    pub fn built_by(mut self, compiler: Compiler) -> Self {
+        self.built_by = Some(compiler);
+        self
+    }
+
+    pub fn stage(mut self, stage: u32) -> Self {
+        self.stage = Some(stage);
+        self
+    }
 }
 
 pub struct RunConfig<'a> {
@@ -136,7 +188,7 @@ pub struct RunConfig<'a> {
 
 impl RunConfig<'_> {
     pub fn build_triple(&self) -> TargetSelection {
-        self.builder.build.build
+        self.builder.build.host_target
     }
 
     /// Return a list of crate names selected by `run.paths`.
@@ -442,13 +494,15 @@ impl StepDescription {
 
     fn is_excluded(&self, builder: &Builder<'_>, pathset: &PathSet) -> bool {
         if builder.config.skip.iter().any(|e| pathset.has(e, builder.kind)) {
-            if !matches!(builder.config.dry_run, DryRun::SelfCheck) {
+            if !matches!(builder.config.get_dry_run(), DryRun::SelfCheck) {
                 println!("Skipping {pathset:?} because it is excluded");
             }
             return true;
         }
 
-        if !builder.config.skip.is_empty() && !matches!(builder.config.dry_run, DryRun::SelfCheck) {
+        if !builder.config.skip.is_empty()
+            && !matches!(builder.config.get_dry_run(), DryRun::SelfCheck)
+        {
             builder.verbose(|| {
                 println!(
                     "{:?} not skipped for {:?} -- not in {:?}",
@@ -504,8 +558,8 @@ impl StepDescription {
                 match std::path::absolute(p) {
                     Ok(p) => p.strip_prefix(&builder.src).unwrap_or(&p).to_path_buf(),
                     Err(e) => {
-                        eprintln!("ERROR: {:?}", e);
-                        panic!("Due to the above error, failed to resolve path: {:?}", p);
+                        eprintln!("ERROR: {e:?}");
+                        panic!("Due to the above error, failed to resolve path: {p:?}");
                     }
                 }
             })
@@ -684,7 +738,7 @@ impl<'a> ShouldRun<'a> {
     ///
     /// [`path`]: ShouldRun::path
     pub fn paths(mut self, paths: &[&str]) -> Self {
-        let submodules_paths = build_helper::util::parse_gitmodules(&self.builder.src);
+        let submodules_paths = self.builder.submodule_paths();
 
         self.paths.insert(PathSet::Set(
             paths
@@ -694,8 +748,7 @@ impl<'a> ShouldRun<'a> {
                     if !submodules_paths.iter().any(|sm_p| p.contains(sm_p)) {
                         assert!(
                             self.builder.src.join(p).exists(),
-                            "`should_run.paths` should correspond to real on-disk paths - use `alias` if there is no relevant path: {}",
-                            p
+                            "`should_run.paths` should correspond to real on-disk paths - use `alias` if there is no relevant path: {p}"
                         );
                     }
 
@@ -946,7 +999,6 @@ impl<'a> Builder<'a> {
                 clippy::CI,
             ),
             Kind::Check | Kind::Fix => describe!(
-                check::Std,
                 check::Rustc,
                 check::Rustdoc,
                 check::CodegenBackend,
@@ -962,6 +1014,13 @@ impl<'a> Builder<'a> {
                 check::Compiletest,
                 check::FeaturesStatusDump,
                 check::CoverageDump,
+                // This has special staging logic, it may run on stage 1 while others run on stage 0.
+                // It takes quite some time to build stage 1, so put this at the end.
+                //
+                // FIXME: This also helps bootstrap to not interfere with stage 0 builds. We should probably fix
+                // that issue somewhere else, but we still want to keep `check::Std` at the end so that the
+                // quicker steps run before this.
+                check::Std,
             ),
             Kind::Test => describe!(
                 crate::core::build_steps::toolstate::ToolStateCheck,
@@ -1172,6 +1231,7 @@ impl<'a> Builder<'a> {
             stack: RefCell::new(Vec::new()),
             time_spent_on_dependencies: Cell::new(Duration::new(0, 0)),
             paths,
+            submodule_paths_cache: Default::default(),
         }
     }
 
@@ -1289,10 +1349,10 @@ impl<'a> Builder<'a> {
     ) -> Compiler {
         let mut resolved_compiler = if self.build.force_use_stage2(stage) {
             trace!(target: "COMPILER_FOR", ?stage, "force_use_stage2");
-            self.compiler(2, self.config.build)
+            self.compiler(2, self.config.host_target)
         } else if self.build.force_use_stage1(stage, target) {
             trace!(target: "COMPILER_FOR", ?stage, "force_use_stage1");
-            self.compiler(1, self.config.build)
+            self.compiler(1, self.config.host_target)
         } else {
             trace!(target: "COMPILER_FOR", ?stage, ?host, "no force, fallback to `compiler()`");
             self.compiler(stage, host)
@@ -1304,6 +1364,49 @@ impl<'a> Builder<'a> {
 
         trace!(target: "COMPILER_FOR", ?resolved_compiler);
         resolved_compiler
+    }
+
+    /// Obtain a standard library for the given target that will be built by the passed compiler.
+    /// The standard library will be linked to the sysroot of the passed compiler.
+    ///
+    /// Prefer using this method rather than manually invoking `Std::new`.
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(
+            level = "trace",
+            name = "Builder::std",
+            target = "STD",
+            skip_all,
+            fields(
+                compiler = ?compiler,
+                target = ?target,
+            ),
+        ),
+    )]
+    pub fn std(&self, compiler: Compiler, target: TargetSelection) {
+        // FIXME: make the `Std` step return some type-level "proof" that std was indeed built,
+        // and then require passing that to all Cargo invocations that we do.
+
+        // The "stage 0" std is always precompiled and comes with the stage0 compiler, so we have
+        // special logic for it, to avoid creating needless and confusing Std steps that don't
+        // actually build anything.
+        if compiler.stage == 0 {
+            if target != compiler.host {
+                panic!(
+                    r"It is not possible to build the standard library for `{target}` using the stage0 compiler.
+You have to build a stage1 compiler for `{}` first, and then use it to build a standard library for `{target}`.
+",
+                    compiler.host
+                )
+            }
+
+            // We still need to link the prebuilt standard library into the ephemeral stage0 sysroot
+            self.ensure(StdLink::from_std(Std::new(compiler, target), compiler));
+        } else {
+            // This step both compiles the std and links it into the compiler's sysroot.
+            // Yes, it's quite magical and side-effecty.. would be nice to refactor later.
+            self.ensure(Std::new(compiler, target));
+        }
     }
 
     pub fn sysroot(&self, compiler: Compiler) -> PathBuf {
@@ -1350,7 +1453,7 @@ impl<'a> Builder<'a> {
     /// Windows.
     pub fn libdir_relative(&self, compiler: Compiler) -> &Path {
         if compiler.is_snapshot(self) {
-            libdir(self.config.build).as_ref()
+            libdir(self.config.host_target).as_ref()
         } else {
             match self.config.libdir_relative() {
                 Some(relative_libdir) if compiler.stage >= 1 => relative_libdir,
@@ -1389,7 +1492,7 @@ impl<'a> Builder<'a> {
         // Windows doesn't need dylib path munging because the dlls for the
         // compiler live next to the compiler and the system will find them
         // automatically.
-        if cfg!(windows) {
+        if cfg!(any(windows, target_os = "cygwin")) {
             return;
         }
 
@@ -1431,9 +1534,10 @@ impl<'a> Builder<'a> {
             return cmd;
         }
 
-        let _ = self.ensure(tool::Clippy { compiler: run_compiler, target: self.build.build });
-        let cargo_clippy =
-            self.ensure(tool::CargoClippy { compiler: run_compiler, target: self.build.build });
+        let _ =
+            self.ensure(tool::Clippy { compiler: run_compiler, target: self.build.host_target });
+        let cargo_clippy = self
+            .ensure(tool::CargoClippy { compiler: run_compiler, target: self.build.host_target });
         let mut dylib_path = helpers::dylib_path();
         dylib_path.insert(0, self.sysroot(run_compiler).join("lib"));
 
@@ -1446,9 +1550,10 @@ impl<'a> Builder<'a> {
     pub fn cargo_miri_cmd(&self, run_compiler: Compiler) -> BootstrapCommand {
         assert!(run_compiler.stage > 0, "miri can not be invoked at stage 0");
         // Prepare the tools
-        let miri = self.ensure(tool::Miri { compiler: run_compiler, target: self.build.build });
+        let miri =
+            self.ensure(tool::Miri { compiler: run_compiler, target: self.build.host_target });
         let cargo_miri =
-            self.ensure(tool::CargoMiri { compiler: run_compiler, target: self.build.build });
+            self.ensure(tool::CargoMiri { compiler: run_compiler, target: self.build.host_target });
         // Invoke cargo-miri, make sure it can find miri and cargo.
         let mut cmd = command(cargo_miri.tool_path);
         cmd.env("MIRI", &miri.tool_path);
@@ -1498,6 +1603,19 @@ impl<'a> Builder<'a> {
             }
         }
         None
+    }
+
+    /// Updates all submodules, and exits with an error if submodule
+    /// management is disabled and the submodule does not exist.
+    pub fn require_and_update_all_submodules(&self) {
+        for submodule in self.submodule_paths() {
+            self.require_submodule(submodule, None);
+        }
+    }
+
+    /// Get all submodules from the src directory.
+    pub fn submodule_paths(&self) -> &[String] {
+        self.submodule_paths_cache.get_or_init(|| build_helper::util::parse_gitmodules(&self.src))
     }
 
     /// Ensure that a given step is built, returning its output. This will
@@ -1627,5 +1745,15 @@ impl<'a> Builder<'a> {
         if let Err(err) = opener::open(path) {
             self.info(&format!("{err}\n"));
         }
+    }
+
+    pub fn exec_ctx(&self) -> &ExecutionContext {
+        &self.config.exec_ctx
+    }
+}
+
+impl<'a> AsRef<ExecutionContext> for Builder<'a> {
+    fn as_ref(&self) -> &ExecutionContext {
+        self.exec_ctx()
     }
 }

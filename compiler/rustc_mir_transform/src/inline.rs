@@ -5,7 +5,7 @@ use std::iter;
 use std::ops::{Range, RangeFrom};
 
 use rustc_abi::{ExternAbi, FieldIdx};
-use rustc_attr_parsing::{InlineAttr, OptimizeAttr};
+use rustc_attr_data_structures::{InlineAttr, OptimizeAttr};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
 use rustc_index::Idx;
@@ -770,14 +770,15 @@ fn check_mir_is_available<'tcx, I: Inliner<'tcx>>(
         return Ok(());
     }
 
-    if callee_def_id.is_local()
+    if let Some(callee_def_id) = callee_def_id.as_local()
         && !inliner
             .tcx()
             .is_lang_item(inliner.tcx().parent(caller_def_id), rustc_hir::LangItem::FnOnce)
     {
         // If we know for sure that the function we're calling will itself try to
         // call us, then we avoid inlining that function.
-        if inliner.tcx().mir_callgraph_reachable((callee, caller_def_id.expect_local())) {
+        if inliner.tcx().mir_callgraph_cyclic(caller_def_id.expect_local()).contains(&callee_def_id)
+        {
             debug!("query cycle avoidance");
             return Err("caller might be reachable from callee");
         }

@@ -1,9 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::fmt;
 
-pub use BoundRegionConversionTime::*;
-pub use RegionVariableOrigin::*;
-pub use SubregionOrigin::*;
 pub use at::DefineOpaqueTypes;
 use free_regions::RegionRelations;
 pub use freshen::TypeFreshener;
@@ -35,7 +32,7 @@ use rustc_middle::ty::{
     PseudoCanonicalInput, Term, TermKind, Ty, TyCtxt, TyVid, TypeFoldable, TypeFolder,
     TypeSuperFoldable, TypeVisitable, TypeVisitableExt, TypingEnv, TypingMode, fold_regions,
 };
-use rustc_span::{Span, Symbol};
+use rustc_span::{DUMMY_SP, Span, Symbol};
 use snapshot::undo_log::InferCtxtUndoLogs;
 use tracing::{debug, instrument};
 use type_variable::TypeVariableOrigin;
@@ -150,7 +147,7 @@ pub struct InferCtxtInner<'tcx> {
     /// for each body-id in this map, which will process the
     /// obligations within. This is expected to be done 'late enough'
     /// that all type inference variables have been bound and so forth.
-    region_obligations: Vec<RegionObligation<'tcx>>,
+    region_obligations: Vec<TypeOutlivesConstraint<'tcx>>,
 
     /// Caches for opaque type inference.
     opaque_type_storage: OpaqueTypeStorage<'tcx>,
@@ -173,7 +170,7 @@ impl<'tcx> InferCtxtInner<'tcx> {
     }
 
     #[inline]
-    pub fn region_obligations(&self) -> &[RegionObligation<'tcx>] {
+    pub fn region_obligations(&self) -> &[TypeOutlivesConstraint<'tcx>] {
         &self.region_obligations
     }
 
@@ -403,7 +400,7 @@ pub enum RegionVariableOrigin {
     /// Region variables created for ill-categorized reasons.
     ///
     /// They mostly indicate places in need of refactoring.
-    MiscVariable(Span),
+    Misc(Span),
 
     /// Regions created by a `&P` or `[...]` pattern.
     PatternRegion(Span),
@@ -467,28 +464,26 @@ pub struct FixupError {
 
 impl fmt::Display for FixupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use TyOrConstInferVar::*;
-
         match self.unresolved {
-            TyInt(_) => write!(
+            TyOrConstInferVar::TyInt(_) => write!(
                 f,
                 "cannot determine the type of this integer; \
                  add a suffix to specify the type explicitly"
             ),
-            TyFloat(_) => write!(
+            TyOrConstInferVar::TyFloat(_) => write!(
                 f,
                 "cannot determine the type of this number; \
                  add a suffix to specify the type explicitly"
             ),
-            Ty(_) => write!(f, "unconstrained type"),
-            Const(_) => write!(f, "unconstrained const value"),
+            TyOrConstInferVar::Ty(_) => write!(f, "unconstrained type"),
+            TyOrConstInferVar::Const(_) => write!(f, "unconstrained const value"),
         }
     }
 }
 
 /// See the `region_obligations` field for more information.
 #[derive(Clone, Debug)]
-pub struct RegionObligation<'tcx> {
+pub struct TypeOutlivesConstraint<'tcx> {
     pub sub_region: ty::Region<'tcx>,
     pub sup_type: Ty<'tcx>,
     pub origin: SubregionOrigin<'tcx>,
@@ -738,19 +733,6 @@ impl<'tcx> InferCtxt<'tcx> {
         })
     }
 
-    pub fn region_outlives_predicate(
-        &self,
-        cause: &traits::ObligationCause<'tcx>,
-        predicate: ty::PolyRegionOutlivesPredicate<'tcx>,
-    ) {
-        self.enter_forall(predicate, |ty::OutlivesPredicate(r_a, r_b)| {
-            let origin = SubregionOrigin::from_obligation_cause(cause, || {
-                RelateRegionParamBound(cause.span, None)
-            });
-            self.sub_regions(origin, r_b, r_a); // `b : a` ==> `a <= b`
-        })
-    }
-
     /// Number of type variables created so far.
     pub fn num_ty_vars(&self) -> usize {
         self.inner.borrow_mut().type_variables().num_vars()
@@ -836,6 +818,13 @@ impl<'tcx> InferCtxt<'tcx> {
         ty::Region::new_var(self.tcx, region_var)
     }
 
+    pub fn next_term_var_of_kind(&self, term: ty::Term<'tcx>, span: Span) -> ty::Term<'tcx> {
+        match term.kind() {
+            ty::TermKind::Ty(_) => self.next_ty_var(span).into(),
+            ty::TermKind::Const(_) => self.next_const_var(span).into(),
+        }
+    }
+
     /// Return the universe that the region `r` was created in. For
     /// most regions (e.g., `'static`, named regions from the user,
     /// etc) this is the root universe U0. For inference variables or
@@ -871,7 +860,10 @@ impl<'tcx> InferCtxt<'tcx> {
             GenericParamDefKind::Lifetime => {
                 // Create a region inference variable for the given
                 // region parameter definition.
-                self.next_region_var(RegionParameterDefinition(span, param.name)).into()
+                self.next_region_var(RegionVariableOrigin::RegionParameterDefinition(
+                    span, param.name,
+                ))
+                .into()
             }
             GenericParamDefKind::Type { .. } => {
                 // Create a type inference variable for the given
@@ -1052,6 +1044,13 @@ impl<'tcx> InferCtxt<'tcx> {
         }
     }
 
+    pub fn shallow_resolve_term(&self, term: ty::Term<'tcx>) -> ty::Term<'tcx> {
+        match term.kind() {
+            ty::TermKind::Ty(ty) => self.shallow_resolve(ty).into(),
+            ty::TermKind::Const(ct) => self.shallow_resolve_const(ct).into(),
+        }
+    }
+
     pub fn root_var(&self, var: ty::TyVid) -> ty::TyVid {
         self.inner.borrow_mut().type_variables().root_var(var)
     }
@@ -1178,7 +1177,7 @@ impl<'tcx> InferCtxt<'tcx> {
             let arg: ty::GenericArg<'_> = match bound_var_kind {
                 ty::BoundVariableKind::Ty(_) => self.next_ty_var(span).into(),
                 ty::BoundVariableKind::Region(br) => {
-                    self.next_region_var(BoundRegion(span, br, lbrct)).into()
+                    self.next_region_var(RegionVariableOrigin::BoundRegion(span, br, lbrct)).into()
                 }
                 ty::BoundVariableKind::Const => self.next_const_var(span).into(),
             };
@@ -1385,7 +1384,7 @@ impl<'tcx> TyOrConstInferVar {
     /// for types other than `ty::Infer(_)` (or `InferTy::Fresh*`) and
     /// for constants other than `ty::ConstKind::Infer(_)` (or `InferConst::Fresh`).
     pub fn maybe_from_generic_arg(arg: GenericArg<'tcx>) -> Option<Self> {
-        match arg.unpack() {
+        match arg.kind() {
             GenericArgKind::Type(ty) => Self::maybe_from_ty(ty),
             GenericArgKind::Const(ct) => Self::maybe_from_const(ct),
             GenericArgKind::Lifetime(_) => None,
@@ -1396,7 +1395,7 @@ impl<'tcx> TyOrConstInferVar {
     /// for types other than `ty::Infer(_)` (or `InferTy::Fresh*`) and
     /// for constants other than `ty::ConstKind::Infer(_)` (or `InferConst::Fresh`).
     pub fn maybe_from_term(term: Term<'tcx>) -> Option<Self> {
-        match term.unpack() {
+        match term.kind() {
             TermKind::Ty(ty) => Self::maybe_from_ty(ty),
             TermKind::Const(ct) => Self::maybe_from_const(ct),
         }
@@ -1478,15 +1477,15 @@ impl<'tcx> TypeTrace<'tcx> {
 impl<'tcx> SubregionOrigin<'tcx> {
     pub fn span(&self) -> Span {
         match *self {
-            Subtype(ref a) => a.span(),
-            RelateObjectBound(a) => a,
-            RelateParamBound(a, ..) => a,
-            RelateRegionParamBound(a, _) => a,
-            Reborrow(a) => a,
-            ReferenceOutlivesReferent(_, a) => a,
-            CompareImplItemObligation { span, .. } => span,
-            AscribeUserTypeProvePredicate(span) => span,
-            CheckAssociatedTypeBounds { ref parent, .. } => parent.span(),
+            SubregionOrigin::Subtype(ref a) => a.span(),
+            SubregionOrigin::RelateObjectBound(a) => a,
+            SubregionOrigin::RelateParamBound(a, ..) => a,
+            SubregionOrigin::RelateRegionParamBound(a, _) => a,
+            SubregionOrigin::Reborrow(a) => a,
+            SubregionOrigin::ReferenceOutlivesReferent(_, a) => a,
+            SubregionOrigin::CompareImplItemObligation { span, .. } => span,
+            SubregionOrigin::AscribeUserTypeProvePredicate(span) => span,
+            SubregionOrigin::CheckAssociatedTypeBounds { ref parent, .. } => parent.span(),
         }
     }
 
@@ -1534,15 +1533,15 @@ impl<'tcx> SubregionOrigin<'tcx> {
 impl RegionVariableOrigin {
     pub fn span(&self) -> Span {
         match *self {
-            MiscVariable(a)
-            | PatternRegion(a)
-            | BorrowRegion(a)
-            | Autoref(a)
-            | Coercion(a)
-            | RegionParameterDefinition(a, ..)
-            | BoundRegion(a, ..)
-            | UpvarRegion(_, a) => a,
-            Nll(..) => bug!("NLL variable used with `span`"),
+            RegionVariableOrigin::Misc(a)
+            | RegionVariableOrigin::PatternRegion(a)
+            | RegionVariableOrigin::BorrowRegion(a)
+            | RegionVariableOrigin::Autoref(a)
+            | RegionVariableOrigin::Coercion(a)
+            | RegionVariableOrigin::RegionParameterDefinition(a, ..)
+            | RegionVariableOrigin::BoundRegion(a, ..)
+            | RegionVariableOrigin::UpvarRegion(_, a) => a,
+            RegionVariableOrigin::Nll(..) => bug!("NLL variable used with `span`"),
         }
     }
 }
@@ -1563,15 +1562,16 @@ impl<'tcx> InferCtxt<'tcx> {
         }
     }
 
-    /// Given a [`hir::HirId`] for a block, get the span of its last expression
-    /// or statement, peeling off any inner blocks.
+    /// Given a [`hir::HirId`] for a block (or an expr of a block), get the span
+    /// of its last expression or statement, peeling off any inner blocks.
     pub fn find_block_span_from_hir_id(&self, hir_id: hir::HirId) -> Span {
         match self.tcx.hir_node(hir_id) {
-            hir::Node::Block(blk) => self.find_block_span(blk),
-            // The parser was in a weird state if either of these happen, but
-            // it's better not to panic.
+            hir::Node::Block(blk)
+            | hir::Node::Expr(&hir::Expr { kind: hir::ExprKind::Block(blk, _), .. }) => {
+                self.find_block_span(blk)
+            }
             hir::Node::Expr(e) => e.span,
-            _ => rustc_span::DUMMY_SP,
+            _ => DUMMY_SP,
         }
     }
 }

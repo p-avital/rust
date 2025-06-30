@@ -23,7 +23,7 @@ use crate::core::build_steps::doc::DocumentationFormat;
 use crate::core::build_steps::tool::{self, Tool};
 use crate::core::build_steps::vendor::{VENDOR_DIR, Vendor};
 use crate::core::build_steps::{compile, llvm};
-use crate::core::builder::{Builder, Kind, RunConfig, ShouldRun, Step};
+use crate::core::builder::{Builder, Kind, RunConfig, ShouldRun, Step, StepMetadata};
 use crate::core::config::TargetSelection;
 use crate::utils::build_stamp::{self, BuildStamp};
 use crate::utils::channel::{self, Info};
@@ -83,6 +83,10 @@ impl Step for Docs {
         tarball.add_bulk_dir(builder.doc_out(host), dest);
         tarball.add_file(builder.src.join("src/doc/robots.txt"), dest, FileType::Regular);
         Some(tarball.generate())
+    }
+
+    fn metadata(&self) -> Option<StepMetadata> {
+        Some(StepMetadata::dist("docs", self.host))
     }
 }
 
@@ -354,6 +358,10 @@ impl Step for Mingw {
 
         Some(tarball.generate())
     }
+
+    fn metadata(&self) -> Option<StepMetadata> {
+        Some(StepMetadata::dist("mingw", self.host))
+    }
 }
 
 #[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
@@ -422,7 +430,7 @@ impl Step for Rustc {
             }
 
             let ra_proc_macro_srv_compiler =
-                builder.compiler_for(compiler.stage, builder.config.build, compiler.host);
+                builder.compiler_for(compiler.stage, builder.config.host_target, compiler.host);
             builder.ensure(compile::Rustc::new(ra_proc_macro_srv_compiler, compiler.host));
 
             if let Some(ra_proc_macro_srv) = builder.ensure_if_default(
@@ -539,6 +547,10 @@ impl Step for Rustc {
                 license(&entry.path());
             }
         }
+    }
+
+    fn metadata(&self) -> Option<StepMetadata> {
+        Some(StepMetadata::dist("rustc", self.compiler.host))
     }
 }
 
@@ -696,7 +708,7 @@ impl Step for Std {
         run.builder.ensure(Std {
             compiler: run.builder.compiler_for(
                 run.builder.top_stage,
-                run.builder.config.build,
+                run.builder.config.host_target,
                 run.target,
             ),
             target: run.target,
@@ -711,7 +723,7 @@ impl Step for Std {
             return None;
         }
 
-        builder.ensure(compile::Std::new(compiler, target));
+        builder.std(compiler, target);
 
         let mut tarball = Tarball::new(builder, "rust-std", &target.triple);
         tarball.include_target_in_component_name(true);
@@ -722,6 +734,10 @@ impl Step for Std {
         copy_target_libs(builder, target, tarball.image_dir(), &stamp);
 
         Some(tarball.generate())
+    }
+
+    fn metadata(&self) -> Option<StepMetadata> {
+        Some(StepMetadata::dist("std", self.target).built_by(self.compiler))
     }
 }
 
@@ -748,7 +764,7 @@ impl Step for RustcDev {
         run.builder.ensure(RustcDev {
             compiler: run.builder.compiler_for(
                 run.builder.top_stage,
-                run.builder.config.build,
+                run.builder.config.host_target,
                 run.target,
             ),
             target: run.target,
@@ -776,7 +792,8 @@ impl Step for RustcDev {
         copy_src_dirs(
             builder,
             &builder.src,
-            &["compiler"],
+            // The compiler has a path dependency on proc_macro, so make sure to include it.
+            &["compiler", "library/proc_macro"],
             &[],
             &tarball.image_dir().join("lib/rustlib/rustc-src/rust"),
         );
@@ -814,7 +831,7 @@ impl Step for Analysis {
             // through the sysroot uplifting.
             compiler: run.builder.compiler_for(
                 run.builder.top_stage,
-                run.builder.config.build,
+                run.builder.config.host_target,
                 run.target,
             ),
             target: run.target,
@@ -1001,6 +1018,10 @@ impl Step for Src {
 
         tarball.generate()
     }
+
+    fn metadata(&self) -> Option<StepMetadata> {
+        Some(StepMetadata::dist("src", TargetSelection::default()))
+    }
 }
 
 #[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
@@ -1035,18 +1056,18 @@ impl Step for PlainSourceTarball {
         let src_files = [
             // tidy-alphabetical-start
             ".gitmodules",
-            "bootstrap.example.toml",
-            "Cargo.lock",
-            "Cargo.toml",
-            "configure",
             "CONTRIBUTING.md",
             "COPYRIGHT",
+            "Cargo.lock",
+            "Cargo.toml",
             "LICENSE-APACHE",
-            "license-metadata.json",
             "LICENSE-MIT",
             "README.md",
             "RELEASES.md",
             "REUSE.toml",
+            "bootstrap.example.toml",
+            "configure",
+            "license-metadata.json",
             "x",
             "x.ps1",
             "x.py",
@@ -1167,7 +1188,7 @@ impl Step for Cargo {
         run.builder.ensure(Cargo {
             compiler: run.builder.compiler_for(
                 run.builder.top_stage,
-                run.builder.config.build,
+                run.builder.config.host_target,
                 run.target,
             ),
             target: run.target,
@@ -1223,7 +1244,7 @@ impl Step for RustAnalyzer {
         run.builder.ensure(RustAnalyzer {
             compiler: run.builder.compiler_for(
                 run.builder.top_stage,
-                run.builder.config.build,
+                run.builder.config.host_target,
                 run.target,
             ),
             target: run.target,
@@ -1267,7 +1288,7 @@ impl Step for Clippy {
         run.builder.ensure(Clippy {
             compiler: run.builder.compiler_for(
                 run.builder.top_stage,
-                run.builder.config.build,
+                run.builder.config.host_target,
                 run.target,
             ),
             target: run.target,
@@ -1316,7 +1337,7 @@ impl Step for Miri {
         run.builder.ensure(Miri {
             compiler: run.builder.compiler_for(
                 run.builder.top_stage,
-                run.builder.config.build,
+                run.builder.config.host_target,
                 run.target,
             ),
             target: run.target,
@@ -1403,14 +1424,14 @@ impl Step for CodegenBackend {
         let backend = self.backend;
 
         let mut tarball =
-            Tarball::new(builder, &format!("rustc-codegen-{}", backend), &compiler.host.triple);
+            Tarball::new(builder, &format!("rustc-codegen-{backend}"), &compiler.host.triple);
         if backend == "cranelift" {
             tarball.set_overlay(OverlayKind::RustcCodegenCranelift);
         } else {
-            panic!("Unknown backend rustc_codegen_{}", backend);
+            panic!("Unknown backend rustc_codegen_{backend}");
         }
         tarball.is_preview(true);
-        tarball.add_legal_and_readme_to(format!("share/doc/rustc_codegen_{}", backend));
+        tarball.add_legal_and_readme_to(format!("share/doc/rustc_codegen_{backend}"));
 
         let src = builder.sysroot(compiler);
         let backends_src = builder.sysroot_codegen_backends(compiler);
@@ -1422,7 +1443,7 @@ impl Step for CodegenBackend {
         // Don't use custom libdir here because ^lib/ will be resolved again with installer
         let backends_dst = PathBuf::from("lib").join(backends_rel);
 
-        let backend_name = format!("rustc_codegen_{}", backend);
+        let backend_name = format!("rustc_codegen_{backend}");
         let mut found_backend = false;
         for backend in fs::read_dir(&backends_src).unwrap() {
             let file_name = backend.unwrap().file_name();
@@ -1461,7 +1482,7 @@ impl Step for Rustfmt {
         run.builder.ensure(Rustfmt {
             compiler: run.builder.compiler_for(
                 run.builder.top_stage,
-                run.builder.config.build,
+                run.builder.config.host_target,
                 run.target,
             ),
             target: run.target,
@@ -1506,7 +1527,7 @@ impl Step for Extended {
     fn make_run(run: RunConfig<'_>) {
         run.builder.ensure(Extended {
             stage: run.builder.top_stage,
-            host: run.builder.config.build,
+            host: run.builder.config.host_target,
             target: run.target,
         });
     }
@@ -1623,7 +1644,7 @@ impl Step for Extended {
             let pkgbuild = |component: &str| {
                 let mut cmd = command("pkgbuild");
                 cmd.arg("--identifier")
-                    .arg(format!("org.rust-lang.{}", component))
+                    .arg(format!("org.rust-lang.{component}"))
                     .arg("--scripts")
                     .arg(pkg.join(component))
                     .arg("--nopayload")
@@ -1680,7 +1701,8 @@ impl Step for Extended {
             cmd.run(builder);
         }
 
-        if target.is_windows() {
+        // FIXME(mati865): `gnullvm` here is temporary, remove it once it can host itself
+        if target.is_windows() && !target.contains("gnullvm") {
             let exe = tmp.join("exe");
             let _ = fs::remove_dir_all(&exe);
 
@@ -2155,7 +2177,7 @@ fn maybe_install_llvm(
         cmd.arg("--libfiles");
         builder.verbose(|| println!("running {cmd:?}"));
         let files = cmd.run_capture_stdout(builder).stdout();
-        let build_llvm_out = &builder.llvm_out(builder.config.build);
+        let build_llvm_out = &builder.llvm_out(builder.config.host_target);
         let target_llvm_out = &builder.llvm_out(target);
         for file in files.trim_end().split(' ') {
             // If we're not using a custom LLVM, make sure we package for the target.
@@ -2274,12 +2296,17 @@ impl Step for LlvmTools {
 
         let target = self.target;
 
-        /* run only if llvm-config isn't used */
-        if let Some(config) = builder.config.target_config.get(&target) {
-            if let Some(ref _s) = config.llvm_config {
-                builder.info(&format!("Skipping LlvmTools ({target}): external LLVM"));
-                return None;
-            }
+        // Run only if a custom llvm-config is not used
+        if let Some(config) = builder.config.target_config.get(&target)
+            && !builder.config.llvm_from_ci
+            && config.llvm_config.is_some()
+        {
+            builder.info(&format!("Skipping LlvmTools ({target}): external LLVM"));
+            return None;
+        }
+
+        if !builder.config.dry_run() {
+            builder.require_submodule("src/llvm-project", None);
         }
 
         builder.ensure(crate::core::build_steps::llvm::Llvm { target });
@@ -2294,6 +2321,12 @@ impl Step for LlvmTools {
             let dst_bindir = format!("lib/rustlib/{}/bin", target.triple);
             for tool in tools_to_install(&builder.paths) {
                 let exe = src_bindir.join(exe(tool, target));
+                // When using `download-ci-llvm`, some of the tools may not exist, so skip trying to copy them.
+                if !exe.exists() && builder.config.llvm_from_ci {
+                    eprintln!("{} does not exist; skipping copy", exe.display());
+                    continue;
+                }
+
                 tarball.add_file(&exe, &dst_bindir, FileType::Executable);
             }
         }
@@ -2328,7 +2361,7 @@ impl Step for LlvmBitcodeLinker {
         run.builder.ensure(LlvmBitcodeLinker {
             compiler: run.builder.compiler_for(
                 run.builder.top_stage,
-                run.builder.config.build,
+                run.builder.config.host_target,
                 run.target,
             ),
             target: run.target,
@@ -2387,11 +2420,15 @@ impl Step for RustDev {
         let target = self.target;
 
         /* run only if llvm-config isn't used */
-        if let Some(config) = builder.config.target_config.get(&target) {
-            if let Some(ref _s) = config.llvm_config {
-                builder.info(&format!("Skipping RustDev ({target}): external LLVM"));
-                return None;
-            }
+        if let Some(config) = builder.config.target_config.get(&target)
+            && let Some(ref _s) = config.llvm_config
+        {
+            builder.info(&format!("Skipping RustDev ({target}): external LLVM"));
+            return None;
+        }
+
+        if !builder.config.dry_run() {
+            builder.require_submodule("src/llvm-project", None);
         }
 
         let mut tarball = Tarball::new(builder, "rust-dev", &target.triple);

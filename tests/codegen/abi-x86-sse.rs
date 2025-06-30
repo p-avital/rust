@@ -17,7 +17,13 @@
 #![crate_type = "lib"]
 
 #[lang = "sized"]
-trait Sized {}
+trait Sized: MetaSized {}
+
+#[lang = "meta_sized"]
+trait MetaSized: PointeeSized {}
+
+#[lang = "pointee_sized"]
+trait PointeeSized {}
 
 #[lang = "copy"]
 trait Copy {}
@@ -27,8 +33,9 @@ trait Copy {}
 #[repr(simd)]
 pub struct Sse([f32; 4]);
 
-// x86-64: <4 x float> @sse_id(<4 x float> {{[^,]*}})
-// x86-32: <4 x float> @sse_id(<4 x float> {{[^,]*}})
+// FIXME: due to #139029 we are passing them all indirectly.
+// x86-64: void @sse_id(ptr{{( [^,]*)?}} sret([16 x i8]){{( .*)?}}, ptr{{( [^,]*)?}})
+// x86-32: void @sse_id(ptr{{( [^,]*)?}} sret([16 x i8]){{( .*)?}}, ptr{{( [^,]*)?}})
 // x86-32-nosse: void @sse_id(ptr{{( [^,]*)?}} sret([16 x i8]){{( .*)?}}, ptr{{( [^,]*)?}})
 #[no_mangle]
 pub fn sse_id(x: Sse) -> Sse {

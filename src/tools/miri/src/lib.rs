@@ -1,5 +1,6 @@
+#![cfg_attr(bootstrap, feature(cfg_match))]
+#![cfg_attr(not(bootstrap), feature(cfg_select))]
 #![feature(rustc_private)]
-#![feature(cfg_match)]
 #![feature(float_gamma)]
 #![feature(float_erf)]
 #![feature(map_try_insert)]
@@ -9,12 +10,14 @@
 #![feature(variant_count)]
 #![feature(yeet_expr)]
 #![feature(nonzero_ops)]
-#![feature(let_chains)]
+#![cfg_attr(bootstrap, feature(nonnull_provenance))]
 #![feature(strict_overflow_ops)]
 #![feature(pointer_is_aligned_to)]
+#![feature(ptr_metadata)]
 #![feature(unqualified_local_imports)]
 #![feature(derive_coerce_pointee)]
 #![feature(arbitrary_self_types)]
+#![cfg_attr(bootstrap, feature(file_lock))]
 // Configure clippy and other lints
 #![allow(
     clippy::collapsible_else_if,
@@ -42,14 +45,7 @@
     rustc::potential_query_instability,
     rustc::untranslatable_diagnostic,
 )]
-#![warn(
-    rust_2018_idioms,
-    unqualified_local_imports,
-    clippy::cast_possible_wrap, // unsigned -> signed
-    clippy::cast_sign_loss, // signed -> unsigned
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-)]
+#![warn(rust_2018_idioms, unqualified_local_imports, clippy::as_conversions)]
 // Needed for rustdoc from bootstrap (with `-Znormalize-docs`).
 #![recursion_limit = "256"]
 
@@ -61,7 +57,7 @@ extern crate tracing;
 extern crate rustc_abi;
 extern crate rustc_apfloat;
 extern crate rustc_ast;
-extern crate rustc_attr_parsing;
+extern crate rustc_attr_data_structures;
 extern crate rustc_const_eval;
 extern crate rustc_data_structures;
 extern crate rustc_errors;
@@ -77,8 +73,8 @@ extern crate rustc_target;
 #[allow(unused_extern_crates)]
 extern crate rustc_driver;
 
+mod alloc;
 mod alloc_addresses;
-mod alloc_bytes;
 mod borrow_tracker;
 mod clock;
 mod concurrency;
@@ -104,6 +100,11 @@ pub use rustc_const_eval::interpret::{self, AllocMap, Provenance as _};
 use rustc_middle::{bug, span_bug};
 use tracing::{info, trace};
 
+//#[cfg(target_os = "linux")]
+//pub mod native_lib {
+//    pub use crate::shims::{init_sv, register_retcode_sv};
+//}
+
 // Type aliases that set the provenance parameter.
 pub type Pointer = interpret::Pointer<Option<machine::Provenance>>;
 pub type StrictPointer = interpret::Pointer<machine::Provenance>;
@@ -113,13 +114,15 @@ pub type OpTy<'tcx> = interpret::OpTy<'tcx, machine::Provenance>;
 pub type PlaceTy<'tcx> = interpret::PlaceTy<'tcx, machine::Provenance>;
 pub type MPlaceTy<'tcx> = interpret::MPlaceTy<'tcx, machine::Provenance>;
 
+pub use crate::alloc::MiriAllocBytes;
 pub use crate::alloc_addresses::{EvalContextExt as _, ProvenanceMode};
-pub use crate::alloc_bytes::MiriAllocBytes;
 pub use crate::borrow_tracker::stacked_borrows::{
     EvalContextExt as _, Item, Permission, Stack, Stacks,
 };
 pub use crate::borrow_tracker::tree_borrows::{EvalContextExt as _, Tree};
-pub use crate::borrow_tracker::{BorTag, BorrowTrackerMethod, EvalContextExt as _, RetagFields};
+pub use crate::borrow_tracker::{
+    BorTag, BorrowTrackerMethod, EvalContextExt as _, RetagFields, TreeBorrowsParams,
+};
 pub use crate::clock::{Instant, MonotonicClock};
 pub use crate::concurrency::cpu_affinity::MAX_CPUS;
 pub use crate::concurrency::data_race::{
@@ -127,7 +130,7 @@ pub use crate::concurrency::data_race::{
 };
 pub use crate::concurrency::init_once::{EvalContextExt as _, InitOnceId};
 pub use crate::concurrency::sync::{
-    CondvarId, EvalContextExt as _, MutexRef, RwLockId, SynchronizationObjects,
+    CondvarId, EvalContextExt as _, MutexRef, RwLockRef, SynchronizationObjects,
 };
 pub use crate::concurrency::thread::{
     BlockReason, DynUnblockCallback, EvalContextExt as _, StackEmptyCallback, ThreadId,
@@ -141,7 +144,7 @@ pub use crate::eval::{
     AlignmentCheck, BacktraceStyle, IsolatedOp, MiriConfig, MiriEntryFnType, RejectOpWith,
     ValidationMode, create_ecx, eval_entry,
 };
-pub use crate::helpers::{AccessKind, EvalContextExt as _};
+pub use crate::helpers::{AccessKind, EvalContextExt as _, ToU64 as _, ToUsize as _};
 pub use crate::intrinsics::EvalContextExt as _;
 pub use crate::machine::{
     AllocExtra, DynMachineCallback, FrameExtra, MachineCallback, MemoryKind, MiriInterpCx,
@@ -171,7 +174,7 @@ pub const MIRI_DEFAULT_ARGS: &[&str] = &[
     "-Zmir-emit-retag",
     "-Zmir-preserve-ub",
     "-Zmir-opt-level=0",
-    "-Zmir-enable-passes=-CheckAlignment,-CheckNull",
+    "-Zmir-enable-passes=-CheckAlignment,-CheckNull,-CheckEnums",
     // Deduplicating diagnostics means we miss events when tracking what happens during an
     // execution. Let's not do that.
     "-Zdeduplicate-diagnostics=no",

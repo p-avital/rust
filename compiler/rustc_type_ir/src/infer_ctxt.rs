@@ -1,11 +1,10 @@
-use std::fmt::Debug;
-
 use derive_where::derive_where;
 #[cfg(feature = "nightly")]
 use rustc_macros::{Decodable_NoContext, Encodable_NoContext, HashStable_NoContext};
 use rustc_type_ir_macros::{TypeFoldable_Generic, TypeVisitable_Generic};
 
 use crate::fold::TypeFoldable;
+use crate::inherent::*;
 use crate::relate::RelateResult;
 use crate::relate::combine::PredicateEmittingRelation;
 use crate::{self as ty, Interner};
@@ -118,12 +117,20 @@ impl<I: Interner> TypingMode<I> {
     }
 
     pub fn borrowck(cx: I, body_def_id: I::LocalDefId) -> TypingMode<I> {
-        TypingMode::Borrowck { defining_opaque_types: cx.opaque_types_defined_by(body_def_id) }
+        let defining_opaque_types = cx.opaque_types_defined_by(body_def_id);
+        if defining_opaque_types.is_empty() {
+            TypingMode::non_body_analysis()
+        } else {
+            TypingMode::Borrowck { defining_opaque_types }
+        }
     }
 
     pub fn post_borrowck_analysis(cx: I, body_def_id: I::LocalDefId) -> TypingMode<I> {
-        TypingMode::PostBorrowckAnalysis {
-            defined_opaque_types: cx.opaque_types_defined_by(body_def_id),
+        let defined_opaque_types = cx.opaque_types_defined_by(body_def_id);
+        if defined_opaque_types.is_empty() {
+            TypingMode::non_body_analysis()
+        } else {
+            TypingMode::PostBorrowckAnalysis { defined_opaque_types }
         }
     }
 }
@@ -167,6 +174,8 @@ pub trait InferCtxtLike: Sized {
         &self,
         vid: ty::RegionVid,
     ) -> <Self::Interner as Interner>::Region;
+
+    fn is_changed_arg(&self, arg: <Self::Interner as Interner>::GenericArg) -> bool;
 
     fn next_region_infer(&self) -> <Self::Interner as Interner>::Region;
     fn next_ty_infer(&self) -> <Self::Interner as Interner>::Ty;
@@ -248,7 +257,7 @@ pub trait InferCtxtLike: Sized {
         span: <Self::Interner as Interner>::Span,
     );
 
-    type OpaqueTypeStorageEntries: Debug + Copy + Default;
+    type OpaqueTypeStorageEntries: OpaqueTypeStorageEntries;
     fn opaque_types_storage_num_entries(&self) -> Self::OpaqueTypeStorageEntries;
     fn clone_opaque_types_lookup_table(
         &self,

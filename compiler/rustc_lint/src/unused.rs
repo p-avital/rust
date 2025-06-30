@@ -1,8 +1,8 @@
 use std::iter;
 
-use rustc_ast as ast;
 use rustc_ast::util::{classify, parser};
-use rustc_ast::{ExprKind, StmtKind};
+use rustc_ast::{self as ast, ExprKind, HasAttrs as _, StmtKind};
+use rustc_attr_data_structures::{AttributeKind, find_attr};
 use rustc_errors::{MultiSpan, pluralize};
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::DefId;
@@ -183,6 +183,7 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
         let mut op_warned = false;
 
         if let Some(must_use_op) = must_use_op {
+            let span = expr.span.find_oldest_ancestor_in_same_ctxt();
             cx.emit_span_lint(
                 UNUSED_MUST_USE,
                 expr.span,
@@ -191,11 +192,11 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
                     label: expr.span,
                     suggestion: if expr_is_from_block {
                         UnusedOpSuggestion::BlockTailExpr {
-                            before_span: expr.span.shrink_to_lo(),
-                            after_span: expr.span.shrink_to_hi(),
+                            before_span: span.shrink_to_lo(),
+                            after_span: span.shrink_to_hi(),
                         }
                     } else {
-                        UnusedOpSuggestion::NormalExpr { span: expr.span.shrink_to_lo() }
+                        UnusedOpSuggestion::NormalExpr { span: span.shrink_to_lo() }
                     },
                 },
             );
@@ -369,10 +370,12 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
         }
 
         fn is_def_must_use(cx: &LateContext<'_>, def_id: DefId, span: Span) -> Option<MustUsePath> {
-            if let Some(attr) = cx.tcx.get_attr(def_id, sym::must_use) {
+            if let Some(reason) = find_attr!(
+                cx.tcx.get_all_attrs(def_id),
+                AttributeKind::MustUse { reason, .. } => reason
+            ) {
                 // check for #[must_use = "..."]
-                let reason = attr.value_str();
-                Some(MustUsePath::Def(span, def_id, reason))
+                Some(MustUsePath::Def(span, def_id, *reason))
             } else {
                 None
             }
@@ -506,9 +509,10 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
                     );
                 }
                 MustUsePath::Def(span, def_id, reason) => {
+                    let span = span.find_oldest_ancestor_in_same_ctxt();
                     cx.emit_span_lint(
                         UNUSED_MUST_USE,
-                        *span,
+                        span,
                         UnusedDef {
                             pre: descr_pre,
                             post: descr_post,
@@ -780,26 +784,30 @@ trait UnusedDelimLint {
         right_pos: Option<BytePos>,
         is_kw: bool,
     ) {
-        let spans = match value.kind {
-            ast::ExprKind::Block(ref block, None) if let [stmt] = block.stmts.as_slice() => stmt
-                .span
-                .find_ancestor_inside(value.span)
-                .map(|span| (value.span.with_hi(span.lo()), value.span.with_lo(span.hi()))),
+        let span_with_attrs = match value.kind {
+            ast::ExprKind::Block(ref block, None) if let [stmt] = block.stmts.as_slice() => {
+                // For the statements with attributes, like `{ #[allow()] println!("Hello!") }`,
+                // the span should contains the attributes, or the suggestion will remove them.
+                if let Some(attr_lo) = stmt.attrs().iter().map(|attr| attr.span.lo()).min() {
+                    stmt.span.with_lo(attr_lo)
+                } else {
+                    stmt.span
+                }
+            }
             ast::ExprKind::Paren(ref expr) => {
                 // For the expr with attributes, like `let _ = (#[inline] || println!("Hello!"));`,
                 // the span should contains the attributes, or the suggestion will remove them.
-                let expr_span_with_attrs =
-                    if let Some(attr_lo) = expr.attrs.iter().map(|attr| attr.span.lo()).min() {
-                        expr.span.with_lo(attr_lo)
-                    } else {
-                        expr.span
-                    };
-                expr_span_with_attrs.find_ancestor_inside(value.span).map(|expr_span| {
-                    (value.span.with_hi(expr_span.lo()), value.span.with_lo(expr_span.hi()))
-                })
+                if let Some(attr_lo) = expr.attrs.iter().map(|attr| attr.span.lo()).min() {
+                    expr.span.with_lo(attr_lo)
+                } else {
+                    expr.span
+                }
             }
             _ => return,
         };
+        let spans = span_with_attrs
+            .find_ancestor_inside(value.span)
+            .map(|span| (value.span.with_hi(span.lo()), value.span.with_lo(span.hi())));
         let keep_space = (
             left_pos.is_some_and(|s| s >= value.span.lo()),
             right_pos.is_some_and(|s| s <= value.span.hi()),

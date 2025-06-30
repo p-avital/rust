@@ -1070,7 +1070,7 @@ impl<'a> Linker for MsvcLinker<'a> {
         self.link_arg("/PDBALTPATH:%_PDB%");
 
         // This will cause the Microsoft linker to embed .natvis info into the PDB file
-        let natvis_dir_path = self.sess.sysroot.join("lib\\rustlib\\etc");
+        let natvis_dir_path = self.sess.opts.sysroot.path().join("lib\\rustlib\\etc");
         if let Ok(natvis_dir) = fs::read_dir(&natvis_dir_path) {
             for entry in natvis_dir {
                 match entry {
@@ -1806,7 +1806,18 @@ pub(crate) fn exported_symbols(
     crate_type: CrateType,
 ) -> Vec<(String, SymbolExportKind)> {
     if let Some(ref exports) = tcx.sess.target.override_export_symbols {
-        return exports.iter().map(|name| (name.to_string(), SymbolExportKind::Text)).collect();
+        return exports
+            .iter()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    // FIXME use the correct export kind for this symbol. override_export_symbols
+                    // can't directly specify the SymbolExportKind as it is defined in rustc_middle
+                    // which rustc_target can't depend on.
+                    SymbolExportKind::Text,
+                )
+            })
+            .collect();
     }
 
     if let CrateType::ProcMacro = crate_type {
@@ -1831,7 +1842,7 @@ fn exported_symbols_for_non_proc_macro(
                 symbol_export::exporting_symbol_name_for_instance_in_crate(tcx, symbol, cnum),
                 info.kind,
             ));
-            symbol_export::extend_exported_symbols(&mut symbols, tcx, symbol, info, cnum);
+            symbol_export::extend_exported_symbols(&mut symbols, tcx, symbol, cnum);
         }
     });
 
@@ -1849,8 +1860,8 @@ fn exported_symbols_for_proc_macro_crate(tcx: TyCtxt<'_>) -> Vec<(String, Symbol
     let metadata_symbol_name = exported_symbols::metadata_symbol_name(tcx);
 
     vec![
-        (proc_macro_decls_name, SymbolExportKind::Text),
-        (metadata_symbol_name, SymbolExportKind::Text),
+        (proc_macro_decls_name, SymbolExportKind::Data),
+        (metadata_symbol_name, SymbolExportKind::Data),
     ]
 }
 
@@ -1859,8 +1870,28 @@ pub(crate) fn linked_symbols(
     crate_type: CrateType,
 ) -> Vec<(String, SymbolExportKind)> {
     match crate_type {
-        CrateType::Executable | CrateType::Cdylib | CrateType::Dylib | CrateType::Sdylib => (),
-        CrateType::Staticlib | CrateType::ProcMacro | CrateType::Rlib => {
+        CrateType::Executable
+        | CrateType::ProcMacro
+        | CrateType::Cdylib
+        | CrateType::Dylib
+        | CrateType::Sdylib => (),
+        CrateType::Staticlib | CrateType::Rlib => {
+            // These are not linked, so no need to generate symbols.o for them.
+            return Vec::new();
+        }
+    }
+
+    match tcx.sess.lto() {
+        Lto::No | Lto::ThinLocal => {}
+        Lto::Thin | Lto::Fat => {
+            // We really only need symbols from upstream rlibs to end up in the linked symbols list.
+            // The rest are in separate object files which the linker will always link in and
+            // doesn't have rules around the order in which they need to appear.
+            // When doing LTO, some of the symbols in the linked symbols list happen to be
+            // internalized by LTO, which then prevents referencing them from symbols.o. When doing
+            // LTO, all object files that get linked in will be local object files rather than
+            // pulled in from rlibs, so an empty linked symbols list works fine to avoid referencing
+            // all those internalized symbols from symbols.o.
             return Vec::new();
         }
     }
@@ -1871,6 +1902,7 @@ pub(crate) fn linked_symbols(
     for_each_exported_symbols_include_dep(tcx, crate_type, |symbol, info, cnum| {
         if info.level.is_below_threshold(export_threshold) && !tcx.is_compiler_builtins(cnum)
             || info.used
+            || info.rustc_std_internal_symbol
         {
             symbols.push((
                 symbol_export::linking_symbol_name_for_instance_in_crate(

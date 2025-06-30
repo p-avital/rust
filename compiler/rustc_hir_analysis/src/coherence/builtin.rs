@@ -10,7 +10,7 @@ use rustc_hir as hir;
 use rustc_hir::ItemKind;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::lang_items::LangItem;
-use rustc_infer::infer::{self, RegionResolutionError, TyCtxtInferExt};
+use rustc_infer::infer::{self, RegionResolutionError, SubregionOrigin, TyCtxtInferExt};
 use rustc_infer::traits::Obligation;
 use rustc_middle::ty::adjustment::CoerceUnsizedInfo;
 use rustc_middle::ty::print::PrintTraitRefExt as _;
@@ -214,11 +214,9 @@ fn visit_implementation_of_dispatch_from_dyn(checker: &Checker<'_>) -> Result<()
     let span = tcx.def_span(impl_did);
     let trait_name = "DispatchFromDyn";
 
-    let dispatch_from_dyn_trait = tcx.require_lang_item(LangItem::DispatchFromDyn, Some(span));
-
     let source = trait_ref.self_ty();
     let target = {
-        assert_eq!(trait_ref.def_id, dispatch_from_dyn_trait);
+        assert!(tcx.is_lang_item(trait_ref.def_id, LangItem::DispatchFromDyn));
 
         trait_ref.args.type_at(1)
     };
@@ -227,7 +225,7 @@ fn visit_implementation_of_dispatch_from_dyn(checker: &Checker<'_>) -> Result<()
     // redundant errors for `DispatchFromDyn`. This is best effort, though.
     let mut res = Ok(());
     tcx.for_each_relevant_impl(
-        tcx.require_lang_item(LangItem::CoerceUnsized, Some(span)),
+        tcx.require_lang_item(LangItem::CoerceUnsized, span),
         source,
         |impl_def_id| {
             res = res.and(tcx.ensure_ok().coerce_unsized_info(impl_def_id));
@@ -339,7 +337,7 @@ fn visit_implementation_of_dispatch_from_dyn(checker: &Checker<'_>) -> Result<()
                     tcx,
                     cause.clone(),
                     param_env,
-                    ty::TraitRef::new(tcx, dispatch_from_dyn_trait, [ty_a, ty_b]),
+                    ty::TraitRef::new(tcx, trait_ref.def_id, [ty_a, ty_b]),
                 ));
                 let errors = ocx.select_all_or_error();
                 if !errors.is_empty() {
@@ -381,8 +379,8 @@ pub(crate) fn coerce_unsized_info<'tcx>(
     let span = tcx.def_span(impl_did);
     let trait_name = "CoerceUnsized";
 
-    let coerce_unsized_trait = tcx.require_lang_item(LangItem::CoerceUnsized, Some(span));
-    let unsize_trait = tcx.require_lang_item(LangItem::Unsize, Some(span));
+    let coerce_unsized_trait = tcx.require_lang_item(LangItem::CoerceUnsized, span);
+    let unsize_trait = tcx.require_lang_item(LangItem::Unsize, span);
 
     let source = tcx.type_of(impl_did).instantiate_identity();
     let trait_ref = tcx.impl_trait_ref(impl_did).unwrap().instantiate_identity();
@@ -417,7 +415,7 @@ pub(crate) fn coerce_unsized_info<'tcx>(
     };
     let (source, target, trait_def_id, kind, field_span) = match (source.kind(), target.kind()) {
         (&ty::Ref(r_a, ty_a, mutbl_a), &ty::Ref(r_b, ty_b, mutbl_b)) => {
-            infcx.sub_regions(infer::RelateObjectBound(span), r_b, r_a);
+            infcx.sub_regions(SubregionOrigin::RelateObjectBound(span), r_b, r_a);
             let mt_a = ty::TypeAndMut { ty: ty_a, mutbl: mutbl_a };
             let mt_b = ty::TypeAndMut { ty: ty_b, mutbl: mutbl_b };
             check_mutbl(mt_a, mt_b, &|ty| Ty::new_imm_ref(tcx, r_b, ty))
@@ -593,7 +591,7 @@ fn infringing_fields_error<'tcx>(
     impl_did: LocalDefId,
     impl_span: Span,
 ) -> ErrorGuaranteed {
-    let trait_did = tcx.require_lang_item(lang_item, Some(impl_span));
+    let trait_did = tcx.require_lang_item(lang_item, impl_span);
 
     let trait_name = tcx.def_path_str(trait_did);
 
@@ -750,7 +748,7 @@ fn visit_implementation_of_pointer_like(checker: &Checker<'_>) -> Result<(), Err
                         ObligationCause::misc(impl_span, checker.impl_def_id),
                         param_env,
                         nontrivial_field_ty,
-                        tcx.require_lang_item(LangItem::PointerLike, Some(impl_span)),
+                        tcx.require_lang_item(LangItem::PointerLike, impl_span),
                     );
                     // FIXME(dyn-star): We should regionck this implementation.
                     if ocx.select_all_or_error().is_empty() {

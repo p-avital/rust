@@ -1,9 +1,10 @@
 //! Dealing with host effect goals, i.e. enforcing the constness in
-//! `T: const Trait` or `T: ~const Trait`.
+//! `T: const Trait` or `T: [const] Trait`.
 
 use rustc_type_ir::fast_reject::DeepRejectCtxt;
 use rustc_type_ir::inherent::*;
 use rustc_type_ir::lang_items::TraitSolverLangItem;
+use rustc_type_ir::solve::SizedTraitKind;
 use rustc_type_ir::solve::inspect::ProbeKind;
 use rustc_type_ir::{self as ty, Interner, elaborate};
 use tracing::instrument;
@@ -61,16 +62,17 @@ where
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,
         assumption: I::Clause,
-    ) -> Result<(), NoSolution> {
+        then: impl FnOnce(&mut EvalCtxt<'_, D>) -> QueryResult<I>,
+    ) -> QueryResult<I> {
         let host_clause = assumption.as_host_effect_clause().unwrap();
 
         let assumption_trait_pred = ecx.instantiate_binder_with_infer(host_clause);
         ecx.eq(goal.param_env, goal.predicate.trait_ref, assumption_trait_pred.trait_ref)?;
 
-        Ok(())
+        then(ecx)
     }
 
-    /// Register additional assumptions for aliases corresponding to `~const` item bounds.
+    /// Register additional assumptions for aliases corresponding to `[const]` item bounds.
     ///
     /// Unlike item bounds, they are not simply implied by the well-formedness of the alias.
     /// Instead, they only hold if the const conditons on the alias also hold. This is why
@@ -159,7 +161,7 @@ where
                 .map(|pred| goal.with(cx, pred));
             ecx.add_goals(GoalSource::ImplWhereBound, where_clause_bounds);
 
-            // For this impl to be `const`, we need to check its `~const` bounds too.
+            // For this impl to be `const`, we need to check its `[const]` bounds too.
             let const_conditions = cx
                 .const_conditions(impl_def_id)
                 .iter_instantiated(cx, impl_args)
@@ -197,11 +199,12 @@ where
         unreachable!("trait aliases are never const")
     }
 
-    fn consider_builtin_sized_candidate(
+    fn consider_builtin_sizedness_candidates(
         _ecx: &mut EvalCtxt<'_, D>,
         _goal: Goal<I, Self>,
+        _sizedness: SizedTraitKind,
     ) -> Result<Candidate<I>, NoSolution> {
-        unreachable!("Sized is never const")
+        unreachable!("Sized/MetaSized is never const")
     }
 
     fn consider_builtin_copy_clone_candidate(

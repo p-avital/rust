@@ -3,13 +3,13 @@ use std::str::FromStr;
 use rustc_abi::ExternAbi;
 use rustc_ast::expand::autodiff_attrs::{AutoDiffAttrs, DiffActivity, DiffMode};
 use rustc_ast::{LitKind, MetaItem, MetaItemInner, attr};
-use rustc_attr_parsing::ReprAttr::ReprAlign;
-use rustc_attr_parsing::{AttributeKind, InlineAttr, InstructionSetAttr, OptimizeAttr};
-use rustc_data_structures::fx::FxHashMap;
+use rustc_attr_data_structures::{
+    AttributeKind, InlineAttr, InstructionSetAttr, OptimizeAttr, ReprAttr, UsedBy, find_attr,
+};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LOCAL_CRATE, LocalDefId};
 use rustc_hir::weak_lang_items::WEAK_LANG_ITEMS;
-use rustc_hir::{self as hir, HirId, LangItem, lang_items};
+use rustc_hir::{self as hir, LangItem, lang_items};
 use rustc_middle::middle::codegen_fn_attrs::{
     CodegenFnAttrFlags, CodegenFnAttrs, PatchableFunctionEntry,
 };
@@ -17,14 +17,16 @@ use rustc_middle::mir::mono::Linkage;
 use rustc_middle::query::Providers;
 use rustc_middle::span_bug;
 use rustc_middle::ty::{self as ty, TyCtxt};
+use rustc_session::lint;
 use rustc_session::parse::feature_err;
-use rustc_session::{Session, lint};
 use rustc_span::{Ident, Span, sym};
 use rustc_target::spec::SanitizerSet;
-use tracing::debug;
 
 use crate::errors;
-use crate::target_features::{check_target_feature_trait_unsafe, from_target_feature_attr};
+use crate::errors::NoMangleNameless;
+use crate::target_features::{
+    check_target_feature_trait_unsafe, check_tied_features, from_target_feature_attr,
+};
 
 fn linkage_by_name(tcx: TyCtxt<'_>, def_id: LocalDefId, name: &str) -> Linkage {
     use rustc_middle::mir::mono::Linkage::*;
@@ -83,11 +85,8 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
 
     let rust_target_features = tcx.rust_target_features(LOCAL_CRATE);
 
-    let mut inline_span = None;
     let mut link_ordinal_span = None;
     let mut no_sanitize_span = None;
-    let mut mixed_export_name_no_mangle_lint_state = MixedExportNameAndNoMangleState::default();
-    let mut no_mangle_span = None;
 
     for attr in attrs.iter() {
         // In some cases, attribute are only valid on functions, but it's the `check_attr`
@@ -95,17 +94,15 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
         // In these cases, we bail from performing further checks that are only meaningful for
         // functions (such as calling `fn_sig`, which ICEs if given a non-function). We also
         // report a delayed bug, just in case `check_attr` isn't doing its job.
-        let fn_sig = || {
+        let fn_sig = |attr_span| {
             use DefKind::*;
 
             let def_kind = tcx.def_kind(did);
             if let Fn | AssocFn | Variant | Ctor(..) = def_kind {
                 Some(tcx.fn_sig(did))
             } else {
-                tcx.dcx().span_delayed_bug(
-                    attr.span(),
-                    "this attribute can only be applied to functions",
-                );
+                tcx.dcx()
+                    .span_delayed_bug(attr_span, "this attribute can only be applied to functions");
                 None
             }
         };
@@ -115,10 +112,59 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                 AttributeKind::Repr(reprs) => {
                     codegen_fn_attrs.alignment = reprs
                         .iter()
-                        .filter_map(|(r, _)| if let ReprAlign(x) = r { Some(*x) } else { None })
+                        .filter_map(
+                            |(r, _)| if let ReprAttr::ReprAlign(x) = r { Some(*x) } else { None },
+                        )
                         .max();
                 }
+                AttributeKind::Cold(_) => codegen_fn_attrs.flags |= CodegenFnAttrFlags::COLD,
+                AttributeKind::ExportName { name, .. } => {
+                    codegen_fn_attrs.export_name = Some(*name);
+                }
+                AttributeKind::Naked(_) => codegen_fn_attrs.flags |= CodegenFnAttrFlags::NAKED,
+                AttributeKind::Align { align, .. } => codegen_fn_attrs.alignment = Some(*align),
+                AttributeKind::LinkName { name, .. } => codegen_fn_attrs.link_name = Some(*name),
+                AttributeKind::NoMangle(attr_span) => {
+                    if tcx.opt_item_name(did.to_def_id()).is_some() {
+                        codegen_fn_attrs.flags |= CodegenFnAttrFlags::NO_MANGLE;
+                    } else {
+                        tcx.dcx().emit_err(NoMangleNameless {
+                            span: *attr_span,
+                            definition: format!(
+                                "{} {}",
+                                tcx.def_descr_article(did.to_def_id()),
+                                tcx.def_descr(did.to_def_id())
+                            ),
+                        });
+                    }
+                }
+                AttributeKind::TrackCaller(attr_span) => {
+                    let is_closure = tcx.is_closure_like(did.to_def_id());
 
+                    if !is_closure
+                        && let Some(fn_sig) = fn_sig(*attr_span)
+                        && fn_sig.skip_binder().abi() != ExternAbi::Rust
+                    {
+                        tcx.dcx().emit_err(errors::RequiresRustAbi { span: *attr_span });
+                    }
+                    if is_closure
+                        && !tcx.features().closure_track_caller()
+                        && !attr_span.allows_unstable(sym::closure_track_caller)
+                    {
+                        feature_err(
+                            &tcx.sess,
+                            sym::closure_track_caller,
+                            *attr_span,
+                            "`#[track_caller]` on closures is currently unstable",
+                        )
+                        .emit();
+                    }
+                    codegen_fn_attrs.flags |= CodegenFnAttrFlags::TRACK_CALLER
+                }
+                AttributeKind::Used { used_by, .. } => match used_by {
+                    UsedBy::Compiler => codegen_fn_attrs.flags |= CodegenFnAttrFlags::USED_COMPILER,
+                    UsedBy::Linker => codegen_fn_attrs.flags |= CodegenFnAttrFlags::USED_LINKER,
+                },
                 _ => {}
             }
         }
@@ -128,7 +174,6 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
         };
 
         match name {
-            sym::cold => codegen_fn_attrs.flags |= CodegenFnAttrFlags::COLD,
             sym::rustc_allocator => codegen_fn_attrs.flags |= CodegenFnAttrFlags::ALLOCATOR,
             sym::ffi_pure => codegen_fn_attrs.flags |= CodegenFnAttrFlags::FFI_PURE,
             sym::ffi_const => codegen_fn_attrs.flags |= CodegenFnAttrFlags::FFI_CONST,
@@ -138,130 +183,10 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
             sym::rustc_allocator_zeroed => {
                 codegen_fn_attrs.flags |= CodegenFnAttrFlags::ALLOCATOR_ZEROED
             }
-            sym::naked => codegen_fn_attrs.flags |= CodegenFnAttrFlags::NAKED,
-            sym::no_mangle => {
-                no_mangle_span = Some(attr.span());
-                if tcx.opt_item_name(did.to_def_id()).is_some() {
-                    codegen_fn_attrs.flags |= CodegenFnAttrFlags::NO_MANGLE;
-                    mixed_export_name_no_mangle_lint_state.track_no_mangle(
-                        attr.span(),
-                        tcx.local_def_id_to_hir_id(did),
-                        attr,
-                    );
-                } else {
-                    tcx.dcx()
-                        .struct_span_err(
-                            attr.span(),
-                            format!(
-                                "`#[no_mangle]` cannot be used on {} {} as it has no name",
-                                tcx.def_descr_article(did.to_def_id()),
-                                tcx.def_descr(did.to_def_id()),
-                            ),
-                        )
-                        .emit();
-                }
-            }
             sym::rustc_std_internal_symbol => {
                 codegen_fn_attrs.flags |= CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL
             }
-            sym::used => {
-                let inner = attr.meta_item_list();
-                match inner.as_deref() {
-                    Some([item]) if item.has_name(sym::linker) => {
-                        if !tcx.features().used_with_arg() {
-                            feature_err(
-                                &tcx.sess,
-                                sym::used_with_arg,
-                                attr.span(),
-                                "`#[used(linker)]` is currently unstable",
-                            )
-                            .emit();
-                        }
-                        codegen_fn_attrs.flags |= CodegenFnAttrFlags::USED_LINKER;
-                    }
-                    Some([item]) if item.has_name(sym::compiler) => {
-                        if !tcx.features().used_with_arg() {
-                            feature_err(
-                                &tcx.sess,
-                                sym::used_with_arg,
-                                attr.span(),
-                                "`#[used(compiler)]` is currently unstable",
-                            )
-                            .emit();
-                        }
-                        codegen_fn_attrs.flags |= CodegenFnAttrFlags::USED;
-                    }
-                    Some(_) => {
-                        tcx.dcx().emit_err(errors::ExpectedUsedSymbol { span: attr.span() });
-                    }
-                    None => {
-                        // Unfortunately, unconditionally using `llvm.used` causes
-                        // issues in handling `.init_array` with the gold linker,
-                        // but using `llvm.compiler.used` caused a nontrivial amount
-                        // of unintentional ecosystem breakage -- particularly on
-                        // Mach-O targets.
-                        //
-                        // As a result, we emit `llvm.compiler.used` only on ELF
-                        // targets. This is somewhat ad-hoc, but actually follows
-                        // our pre-LLVM 13 behavior (prior to the ecosystem
-                        // breakage), and seems to match `clang`'s behavior as well
-                        // (both before and after LLVM 13), possibly because they
-                        // have similar compatibility concerns to us. See
-                        // https://github.com/rust-lang/rust/issues/47384#issuecomment-1019080146
-                        // and following comments for some discussion of this, as
-                        // well as the comments in `rustc_codegen_llvm` where these
-                        // flags are handled.
-                        //
-                        // Anyway, to be clear: this is still up in the air
-                        // somewhat, and is subject to change in the future (which
-                        // is a good thing, because this would ideally be a bit
-                        // more firmed up).
-                        let is_like_elf = !(tcx.sess.target.is_like_darwin
-                            || tcx.sess.target.is_like_windows
-                            || tcx.sess.target.is_like_wasm);
-                        codegen_fn_attrs.flags |= if is_like_elf {
-                            CodegenFnAttrFlags::USED
-                        } else {
-                            CodegenFnAttrFlags::USED_LINKER
-                        };
-                    }
-                }
-            }
             sym::thread_local => codegen_fn_attrs.flags |= CodegenFnAttrFlags::THREAD_LOCAL,
-            sym::track_caller => {
-                let is_closure = tcx.is_closure_like(did.to_def_id());
-
-                if !is_closure
-                    && let Some(fn_sig) = fn_sig()
-                    && fn_sig.skip_binder().abi() != ExternAbi::Rust
-                {
-                    tcx.dcx().emit_err(errors::RequiresRustAbi { span: attr.span() });
-                }
-                if is_closure
-                    && !tcx.features().closure_track_caller()
-                    && !attr.span().allows_unstable(sym::closure_track_caller)
-                {
-                    feature_err(
-                        &tcx.sess,
-                        sym::closure_track_caller,
-                        attr.span(),
-                        "`#[track_caller]` on closures is currently unstable",
-                    )
-                    .emit();
-                }
-                codegen_fn_attrs.flags |= CodegenFnAttrFlags::TRACK_CALLER
-            }
-            sym::export_name => {
-                if let Some(s) = attr.value_str() {
-                    if s.as_str().contains('\0') {
-                        // `#[export_name = ...]` will be converted to a null-terminated string,
-                        // so it may not contain any null characters.
-                        tcx.dcx().emit_err(errors::NullOnExport { span: attr.span() });
-                    }
-                    codegen_fn_attrs.export_name = Some(s);
-                    mixed_export_name_no_mangle_lint_state.track_export_name(attr.span());
-                }
-            }
             sym::target_feature => {
                 let Some(sig) = tcx.hir_node_by_def_id(did).fn_sig() else {
                     tcx.dcx().span_delayed_bug(attr.span(), "target_feature applied to non-fn");
@@ -299,6 +224,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                 }
                 from_target_feature_attr(
                     tcx,
+                    did,
                     attr,
                     rust_target_features,
                     &mut codegen_fn_attrs.target_features,
@@ -337,7 +263,6 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                     }
                 }
             }
-            sym::link_name => codegen_fn_attrs.link_name = attr.value_str(),
             sym::link_ordinal => {
                 link_ordinal_span = Some(attr.span());
                 if let ordinal @ Some(_) = check_link_ordinal(tcx, attr) {
@@ -471,50 +396,20 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
         }
     }
 
-    mixed_export_name_no_mangle_lint_state.lint_if_mixed(tcx);
+    // Apply the minimum function alignment here. This ensures that a function's alignment is
+    // determined by the `-C` flags of the crate it is defined in, not the `-C` flags of the crate
+    // it happens to be codegen'd (or const-eval'd) in.
+    codegen_fn_attrs.alignment =
+        Ord::max(codegen_fn_attrs.alignment, tcx.sess.opts.unstable_opts.min_function_alignment);
 
-    codegen_fn_attrs.inline = attrs.iter().fold(InlineAttr::None, |ia, attr| {
-        if !attr.has_name(sym::inline) {
-            return ia;
-        }
-
-        if attr.is_word() {
-            return InlineAttr::Hint;
-        }
-        let Some(ref items) = attr.meta_item_list() else {
-            return ia;
-        };
-        inline_span = Some(attr.span());
-
-        let [item] = &items[..] else {
-            tcx.dcx().emit_err(errors::ExpectedOneArgument { span: attr.span() });
-            return InlineAttr::None;
-        };
-
-        if item.has_name(sym::always) {
-            InlineAttr::Always
-        } else if item.has_name(sym::never) {
-            InlineAttr::Never
-        } else {
-            tcx.dcx().emit_err(errors::InvalidArgument { span: items[0].span() });
-
-            InlineAttr::None
-        }
-    });
-    codegen_fn_attrs.inline = attrs.iter().fold(codegen_fn_attrs.inline, |ia, attr| {
-        if !attr.has_name(sym::rustc_force_inline) || !tcx.features().rustc_attrs() {
-            return ia;
-        }
-
-        if attr.is_word() {
-            InlineAttr::Force { attr_span: attr.span(), reason: None }
-        } else if let Some(val) = attr.value_str() {
-            InlineAttr::Force { attr_span: attr.span(), reason: Some(val) }
-        } else {
-            debug!("`rustc_force_inline` not checked by attribute validation");
-            ia
-        }
-    });
+    let inline_span;
+    (codegen_fn_attrs.inline, inline_span) = if let Some((inline_attr, span)) =
+        find_attr!(attrs, AttributeKind::Inline(i, span) => (*i, *span))
+    {
+        (inline_attr, Some(span))
+    } else {
+        (InlineAttr::None, None)
+    };
 
     // naked function MUST NOT be inlined! This attribute is required for the rust compiler itself,
     // but not for the code generation backend because at that point the naked function will just be
@@ -523,34 +418,8 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
         codegen_fn_attrs.inline = InlineAttr::Never;
     }
 
-    codegen_fn_attrs.optimize = attrs.iter().fold(OptimizeAttr::Default, |ia, attr| {
-        if !attr.has_name(sym::optimize) {
-            return ia;
-        }
-        if attr.is_word() {
-            tcx.dcx().emit_err(errors::ExpectedOneArgumentOptimize { span: attr.span() });
-            return ia;
-        }
-        let Some(ref items) = attr.meta_item_list() else {
-            return OptimizeAttr::Default;
-        };
-
-        inline_span = Some(attr.span());
-        let [item] = &items[..] else {
-            tcx.dcx().emit_err(errors::ExpectedOneArgumentOptimize { span: attr.span() });
-            return OptimizeAttr::Default;
-        };
-        if item.has_name(sym::size) {
-            OptimizeAttr::Size
-        } else if item.has_name(sym::speed) {
-            OptimizeAttr::Speed
-        } else if item.has_name(sym::none) {
-            OptimizeAttr::DoNotOptimize
-        } else {
-            tcx.dcx().emit_err(errors::InvalidArgumentOptimize { span: item.span() });
-            OptimizeAttr::Default
-        }
-    });
+    codegen_fn_attrs.optimize =
+        find_attr!(attrs, AttributeKind::Optimize(i, _) => *i).unwrap_or(OptimizeAttr::Default);
 
     // #73631: closures inherit `#[target_feature]` annotations
     //
@@ -626,12 +495,15 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
     if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL)
         && codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::NO_MANGLE)
     {
+        let no_mangle_span =
+            find_attr!(attrs, AttributeKind::NoMangle(no_mangle_span) => *no_mangle_span)
+                .unwrap_or_default();
         let lang_item =
             lang_items::extract(attrs).map_or(None, |(name, _span)| LangItem::from_name(name));
         let mut err = tcx
             .dcx()
             .struct_span_err(
-                no_mangle_span.unwrap_or_default(),
+                no_mangle_span,
                 "`#[no_mangle]` cannot be used on internal language items",
             )
             .with_note("Rustc requires this item to have a specific mangled name.")
@@ -682,25 +554,6 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
     }
 
     codegen_fn_attrs
-}
-
-/// Given a map from target_features to whether they are enabled or disabled, ensure only valid
-/// combinations are allowed.
-pub fn check_tied_features(
-    sess: &Session,
-    features: &FxHashMap<&str, bool>,
-) -> Option<&'static [&'static str]> {
-    if !features.is_empty() {
-        for tied in sess.target.tied_target_features() {
-            // Tied features must be set to the same value, or not set at all
-            let mut tied_iter = tied.iter();
-            let enabled = features.get(tied_iter.next().unwrap());
-            if tied_iter.any(|f| enabled != features.get(f)) {
-                return Some(tied);
-            }
-        }
-    }
-    None
 }
 
 /// Checks if the provided DefId is a method in a trait impl for a trait which has track_caller
@@ -768,49 +621,6 @@ fn check_link_name_xor_ordinal(
         tcx.dcx().span_err(span, msg);
     } else {
         tcx.dcx().err(msg);
-    }
-}
-
-#[derive(Default)]
-struct MixedExportNameAndNoMangleState<'a> {
-    export_name: Option<Span>,
-    hir_id: Option<HirId>,
-    no_mangle: Option<Span>,
-    no_mangle_attr: Option<&'a hir::Attribute>,
-}
-
-impl<'a> MixedExportNameAndNoMangleState<'a> {
-    fn track_export_name(&mut self, span: Span) {
-        self.export_name = Some(span);
-    }
-
-    fn track_no_mangle(&mut self, span: Span, hir_id: HirId, attr_name: &'a hir::Attribute) {
-        self.no_mangle = Some(span);
-        self.hir_id = Some(hir_id);
-        self.no_mangle_attr = Some(attr_name);
-    }
-
-    /// Emit diagnostics if the lint condition is met.
-    fn lint_if_mixed(self, tcx: TyCtxt<'_>) {
-        if let Self {
-            export_name: Some(export_name),
-            no_mangle: Some(no_mangle),
-            hir_id: Some(hir_id),
-            no_mangle_attr: Some(_),
-        } = self
-        {
-            tcx.emit_node_span_lint(
-                lint::builtin::UNUSED_ATTRIBUTES,
-                hir_id,
-                no_mangle,
-                errors::MixedExportNameAndNoMangle {
-                    no_mangle,
-                    no_mangle_attr: "#[unsafe(no_mangle)]".to_string(),
-                    export_name,
-                    removal_span: no_mangle,
-                },
-            );
-        }
     }
 }
 

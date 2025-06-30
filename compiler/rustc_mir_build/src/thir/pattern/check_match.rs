@@ -331,7 +331,11 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             | WrapUnsafeBinder { source } => self.is_known_valid_scrutinee(&self.thir()[*source]),
 
             // These diverge.
-            Become { .. } | Break { .. } | Continue { .. } | Return { .. } => true,
+            Become { .. }
+            | Break { .. }
+            | Continue { .. }
+            | ConstContinue { .. }
+            | Return { .. } => true,
 
             // These are statements that evaluate to `()`.
             Assign { .. } | AssignOp { .. } | InlineAsm { .. } | Let { .. } => true,
@@ -353,6 +357,7 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             | Literal { .. }
             | LogicalOp { .. }
             | Loop { .. }
+            | LoopMatch { .. }
             | Match { .. }
             | NamedConst { .. }
             | NonHirLiteral { .. }
@@ -685,8 +690,8 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             let span = self.tcx.def_span(def_id);
             let variable = self.tcx.item_name(def_id).to_string();
             // When we encounter a constant as the binding name, point at the `const` definition.
-            interpreted_as_const = Some(span);
-            interpreted_as_const_sugg = Some(InterpretedAsConst { span: pat.span, variable });
+            interpreted_as_const = Some(InterpretedAsConst { span, variable: variable.clone() });
+            interpreted_as_const_sugg = Some(InterpretedAsConstSugg { span: pat.span, variable });
         } else if let PatKind::Constant { .. } = unpeeled_pat.kind
             && let Ok(snippet) = self.tcx.sess.source_map().span_to_snippet(pat.span)
         {
@@ -738,6 +743,8 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             false
         };
 
+        let witness_1 = cx.print_witness_pat(witnesses.get(0).unwrap());
+
         self.error = Err(self.tcx.dcx().emit_err(PatternNotCovered {
             span: pat.span,
             origin,
@@ -746,6 +753,7 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             interpreted_as_const,
             interpreted_as_const_sugg,
             witness_1_is_privately_uninhabited,
+            witness_1,
             _p: (),
             pattern_ty,
             let_suggestion,
@@ -1047,26 +1055,21 @@ fn find_fallback_pattern_typo<'tcx>(
                 let hir::ItemKind::Use(path, _) = item.kind else {
                     continue;
                 };
-                for res in &path.res {
-                    if let Res::Def(DefKind::Const, id) = res
-                        && infcx.can_eq(param_env, ty, cx.tcx.type_of(id).instantiate_identity())
-                    {
-                        if cx.tcx.visibility(id).is_accessible_from(parent, cx.tcx) {
-                            // The original const is accessible, suggest using it directly.
-                            let item_name = cx.tcx.item_name(*id);
-                            accessible.push(item_name);
-                            accessible_path.push(with_no_trimmed_paths!(cx.tcx.def_path_str(id)));
-                        } else if cx
-                            .tcx
-                            .visibility(item.owner_id)
-                            .is_accessible_from(parent, cx.tcx)
-                        {
-                            // The const is accessible only through the re-export, point at
-                            // the `use`.
-                            let ident = item.kind.ident().unwrap();
-                            imported.push(ident.name);
-                            imported_spans.push(ident.span);
-                        }
+                if let Some(value_ns) = path.res.value_ns
+                    && let Res::Def(DefKind::Const, id) = value_ns
+                    && infcx.can_eq(param_env, ty, cx.tcx.type_of(id).instantiate_identity())
+                {
+                    if cx.tcx.visibility(id).is_accessible_from(parent, cx.tcx) {
+                        // The original const is accessible, suggest using it directly.
+                        let item_name = cx.tcx.item_name(id);
+                        accessible.push(item_name);
+                        accessible_path.push(with_no_trimmed_paths!(cx.tcx.def_path_str(id)));
+                    } else if cx.tcx.visibility(item.owner_id).is_accessible_from(parent, cx.tcx) {
+                        // The const is accessible only through the re-export, point at
+                        // the `use`.
+                        let ident = item.kind.ident().unwrap();
+                        imported.push(ident.name);
+                        imported_spans.push(ident.span);
                     }
                 }
             }

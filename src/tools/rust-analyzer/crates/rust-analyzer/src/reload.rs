@@ -69,6 +69,7 @@ impl GlobalState {
     /// are ready to do semantic work.
     pub(crate) fn is_quiescent(&self) -> bool {
         self.vfs_done
+            && self.fetch_ws_receiver.is_none()
             && !self.fetch_workspaces_queue.op_in_progress()
             && !self.fetch_build_data_queue.op_in_progress()
             && !self.fetch_proc_macros_queue.op_in_progress()
@@ -112,6 +113,16 @@ impl GlobalState {
                 self.config.expand_proc_attr_macros(),
                 Durability::HIGH,
             );
+        }
+
+        if self.config.cargo(None) != old_config.cargo(None) {
+            let req = FetchWorkspaceRequest { path: None, force_crate_graph_reload: false };
+            self.fetch_workspaces_queue.request_op("cargo config changed".to_owned(), req)
+        }
+
+        if self.config.cfg_set_test(None) != old_config.cfg_set_test(None) {
+            let req = FetchWorkspaceRequest { path: None, force_crate_graph_reload: false };
+            self.fetch_workspaces_queue.request_op("cfg_set_test config changed".to_owned(), req)
         }
     }
 
@@ -291,7 +302,7 @@ impl GlobalState {
 
                 if let (Some(_command), Some(path)) = (&discover_command, &path) {
                     let build = linked_projects.iter().find_map(|project| match project {
-                        LinkedProject::InlineJsonProject(it) => it.crate_by_buildfile(path),
+                        LinkedProject::InlineProjectJson(it) => it.crate_by_buildfile(path),
                         _ => None,
                     });
 
@@ -317,7 +328,7 @@ impl GlobalState {
                                 &progress,
                             )
                         }
-                        LinkedProject::InlineJsonProject(it) => {
+                        LinkedProject::InlineProjectJson(it) => {
                             let workspace = project_model::ProjectWorkspace::load_inline(
                                 it.clone(),
                                 &cargo_config,
@@ -659,6 +670,10 @@ impl GlobalState {
                         .chain(
                             ws.sysroot
                                 .root()
+                                .filter(|_| {
+                                    !self.config.extra_env(None).contains_key("RUSTUP_TOOLCHAIN")
+                                        && std::env::var_os("RUSTUP_TOOLCHAIN").is_none()
+                                })
                                 .map(|it| ("RUSTUP_TOOLCHAIN".to_owned(), Some(it.to_string()))),
                         )
                         .collect(),
