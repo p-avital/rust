@@ -20,7 +20,7 @@ fn check_closure_captures(#[rust_analyzer::rust_fixture] ra_fixture: &str, expec
     let def_map = module.def_map(&db);
 
     let mut defs = Vec::new();
-    visit_module(&db, &def_map, module.local_id, &mut |it| defs.push(it));
+    visit_module(&db, def_map, module.local_id, &mut |it| defs.push(it));
 
     let mut captures_info = Vec::new();
     for def in defs {
@@ -442,5 +442,24 @@ fn main() {
 }
 "#,
         expect!["99..165;49..54;120..121,133..134 ByRef(Mut { kind: Default }) a &'? mut A"],
+    );
+}
+
+#[test]
+fn let_binding_is_a_ref_capture() {
+    check_closure_captures(
+        r#"
+//- minicore:copy
+struct S;
+fn main() {
+    let mut s = S;
+    let s_ref = &mut s;
+    let closure = || {
+        if let ref cb = s_ref {
+        }
+    };
+}
+"#,
+        expect!["83..135;49..54;112..117 ByRef(Shared) s_ref &'? &'? mut S"],
     );
 }

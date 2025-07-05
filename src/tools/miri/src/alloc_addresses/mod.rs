@@ -132,14 +132,15 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
         assert!(!matches!(info.kind, AllocKind::Dead));
 
         // This allocation does not have a base address yet, pick or reuse one.
-        if this.machine.native_lib.is_some() {
+        if !this.machine.native_lib.is_empty() {
             // In native lib mode, we use the "real" address of the bytes for this allocation.
             // This ensures the interpreted program and native code have the same view of memory.
+            let params = this.machine.get_default_alloc_params();
             let base_ptr = match info.kind {
                 AllocKind::LiveData => {
                     if memory_kind == MiriMemoryKind::Global.into() {
                         // For new global allocations, we always pre-allocate the memory to be able use the machine address directly.
-                        let prepared_bytes = MiriAllocBytes::zeroed(info.size, info.align)
+                        let prepared_bytes = MiriAllocBytes::zeroed(info.size, info.align, params)
                             .unwrap_or_else(|| {
                                 panic!("Miri ran out of memory: cannot create allocation of {size:?} bytes", size = info.size)
                             });
@@ -158,8 +159,11 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 }
                 AllocKind::Function | AllocKind::VTable => {
                     // Allocate some dummy memory to get a unique address for this function/vtable.
-                    let alloc_bytes =
-                        MiriAllocBytes::from_bytes(&[0u8; 1], Align::from_bytes(1).unwrap());
+                    let alloc_bytes = MiriAllocBytes::from_bytes(
+                        &[0u8; 1],
+                        Align::from_bytes(1).unwrap(),
+                        params,
+                    );
                     let ptr = alloc_bytes.as_ptr();
                     // Leak the underlying memory to ensure it remains unique.
                     std::mem::forget(alloc_bytes);
@@ -168,7 +172,7 @@ trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 AllocKind::Dead => unreachable!(),
             };
             // We don't have to expose this pointer yet, we do that in `prepare_for_native_call`.
-            return interp_ok(base_ptr.addr().try_into().unwrap());
+            return interp_ok(base_ptr.addr().to_u64());
         }
         // We are not in native lib mode, so we control the addresses ourselves.
         if let Some((reuse_addr, clock)) = global_state.reuse.take_addr(
@@ -386,7 +390,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     ) -> InterpResult<'tcx, interpret::Pointer<Provenance>> {
         let this = self.eval_context_ref();
 
-        let (prov, offset) = ptr.into_parts(); // offset is relative (AllocId provenance)
+        let (prov, offset) = ptr.prov_and_relative_offset();
         let alloc_id = prov.alloc_id();
 
         // Get a pointer to the beginning of this allocation.
@@ -409,7 +413,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     ) -> InterpResult<'tcx, MiriAllocBytes> {
         let this = self.eval_context_ref();
         assert!(this.tcx.try_get_global_alloc(id).is_some());
-        if this.machine.native_lib.is_some() {
+        if !this.machine.native_lib.is_empty() {
             // In native lib mode, MiriAllocBytes for global allocations are handled via `prepared_alloc_bytes`.
             // This additional call ensures that some `MiriAllocBytes` are always prepared, just in case
             // this function gets called before the first time `addr_from_alloc_id` gets called.
@@ -429,7 +433,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             prepared_alloc_bytes.copy_from_slice(bytes);
             interp_ok(prepared_alloc_bytes)
         } else {
-            interp_ok(MiriAllocBytes::from_bytes(std::borrow::Cow::Borrowed(bytes), align))
+            let params = this.machine.get_default_alloc_params();
+            interp_ok(MiriAllocBytes::from_bytes(std::borrow::Cow::Borrowed(bytes), align, params))
         }
     }
 
@@ -442,7 +447,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     ) -> Option<(AllocId, Size)> {
         let this = self.eval_context_ref();
 
-        let (tag, addr) = ptr.into_parts(); // addr is absolute (Tag provenance)
+        let (tag, addr) = ptr.into_raw_parts(); // addr is absolute (Miri provenance)
 
         let alloc_id = if let Provenance::Concrete { alloc_id, .. } = tag {
             alloc_id
@@ -461,17 +466,10 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         Some((alloc_id, Size::from_bytes(rel_offset)))
     }
 
-    /// Prepare all exposed memory for a native call.
-    /// This overapproximates the modifications which external code might make to memory:
-    /// We set all reachable allocations as initialized, mark all reachable provenances as exposed
-    /// and overwrite them with `Provenance::WILDCARD`.
-    fn prepare_exposed_for_native_call(&mut self) -> InterpResult<'tcx> {
-        let this = self.eval_context_mut();
-        // We need to make a deep copy of this list, but it's fine; it also serves as scratch space
-        // for the search within `prepare_for_native_call`.
-        let exposed: Vec<AllocId> =
-            this.machine.alloc_addresses.get_mut().exposed.iter().copied().collect();
-        this.prepare_for_native_call(exposed)
+    /// Return a list of all exposed allocations.
+    fn exposed_allocs(&self) -> Vec<AllocId> {
+        let this = self.eval_context_ref();
+        this.machine.alloc_addresses.borrow().exposed.iter().copied().collect()
     }
 }
 

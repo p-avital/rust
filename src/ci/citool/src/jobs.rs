@@ -13,7 +13,7 @@ use crate::utils::load_env_var;
 #[derive(serde::Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Job {
-    /// Name of the job, e.g. mingw-check
+    /// Name of the job, e.g. pr-check-1
     pub name: String,
     /// GitHub runner on which the job should be executed
     pub os: String,
@@ -66,6 +66,8 @@ pub struct JobDatabase {
     pub try_jobs: Vec<Job>,
     #[serde(rename = "auto")]
     pub auto_jobs: Vec<Job>,
+    #[serde(rename = "optional")]
+    pub optional_jobs: Vec<Job>,
 
     /// Shared environments for the individual run types.
     envs: JobEnvironments,
@@ -75,9 +77,10 @@ impl JobDatabase {
     /// Find `auto` jobs that correspond to the passed `pattern`.
     /// Patterns are matched using the glob syntax.
     /// For example `dist-*` matches all jobs starting with `dist-`.
-    fn find_auto_jobs_by_pattern(&self, pattern: &str) -> Vec<Job> {
+    fn find_auto_or_optional_jobs_by_pattern(&self, pattern: &str) -> Vec<Job> {
         self.auto_jobs
             .iter()
+            .chain(self.optional_jobs.iter())
             .filter(|j| glob_match::glob_match(pattern, &j.name))
             .cloned()
             .collect()
@@ -85,14 +88,20 @@ impl JobDatabase {
 }
 
 pub fn load_job_db(db: &str) -> anyhow::Result<JobDatabase> {
-    let mut db: Value = serde_yaml::from_str(db)?;
+    let mut db: Value = serde_yaml::from_str(db).context("failed to parse YAML content")?;
 
     // We need to expand merge keys (<<), because serde_yaml can't deal with them
     // `apply_merge` only applies the merge once, so do it a few times to unwrap nested merges.
-    db.apply_merge()?;
-    db.apply_merge()?;
 
-    let db: JobDatabase = serde_yaml::from_value(db)?;
+    let apply_merge = |db: &mut Value| -> anyhow::Result<()> {
+        db.apply_merge().context("failed to apply merge keys")
+    };
+
+    // Apply merge twice to handle nested merges
+    apply_merge(&mut db)?;
+    apply_merge(&mut db)?;
+
+    let db: JobDatabase = serde_yaml::from_value(db).context("failed to parse job database")?;
     Ok(db)
 }
 
@@ -155,6 +164,8 @@ pub enum RunType {
     TryJob { job_patterns: Option<Vec<String>> },
     /// Merge attempt workflow
     AutoJob,
+    /// Fake job only used for sharing Github Actions cache.
+    MasterJob,
 }
 
 /// Maximum number of custom try jobs that can be requested in a single
@@ -173,7 +184,7 @@ fn calculate_jobs(
                 let mut jobs: Vec<Job> = vec![];
                 let mut unknown_patterns = vec![];
                 for pattern in patterns {
-                    let matched_jobs = db.find_auto_jobs_by_pattern(pattern);
+                    let matched_jobs = db.find_auto_or_optional_jobs_by_pattern(pattern);
                     if matched_jobs.is_empty() {
                         unknown_patterns.push(pattern.clone());
                     } else {
@@ -204,6 +215,7 @@ fn calculate_jobs(
             (jobs, "try", &db.envs.try_env)
         }
         RunType::AutoJob => (db.auto_jobs.clone(), "auto", &db.envs.auto_env),
+        RunType::MasterJob => return Ok(vec![]),
     };
     let jobs = substitute_github_vars(jobs.clone())
         .context("Failed to substitute GitHub context variables in jobs")?;
@@ -256,7 +268,7 @@ pub fn calculate_job_matrix(
     eprintln!("Run type: {run_type:?}");
 
     let jobs = calculate_jobs(&run_type, &db, channel)?;
-    if jobs.is_empty() {
+    if jobs.is_empty() && !matches!(run_type, RunType::MasterJob) {
         return Err(anyhow::anyhow!("Computed job list is empty"));
     }
 
@@ -264,6 +276,7 @@ pub fn calculate_job_matrix(
         RunType::PullRequest => "pr",
         RunType::TryJob { .. } => "try",
         RunType::AutoJob => "auto",
+        RunType::MasterJob => "master",
     };
 
     eprintln!("Output");

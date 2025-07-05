@@ -49,7 +49,7 @@ use std::{fs, str};
 
 use askama::Template;
 use itertools::Either;
-use rustc_attr_parsing::{
+use rustc_attr_data_structures::{
     ConstStability, DeprecatedSince, Deprecation, RustcVersion, StabilityLevel, StableSince,
 };
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
@@ -508,22 +508,21 @@ fn scrape_examples_help(shared: &SharedContext<'_>) -> String {
       the Rustdoc book]({DOC_RUST_LANG_ORG_VERSION}/rustdoc/scraped-examples.html)."
     ));
 
-    let mut ids = IdMap::default();
     format!(
         "<div class=\"main-heading\">\
              <h1>About scraped examples</h1>\
          </div>\
          <div>{}</div>",
-        Markdown {
+        fmt::from_fn(|f| Markdown {
             content: &content,
             links: &[],
-            ids: &mut ids,
+            ids: &mut IdMap::default(),
             error_codes: shared.codes,
             edition: shared.edition(),
             playground: &shared.playground,
             heading_offset: HeadingOffset::H1,
         }
-        .into_string()
+        .write_into(f))
     )
 }
 
@@ -538,7 +537,7 @@ fn document(
     }
 
     fmt::from_fn(move |f| {
-        document_item_info(cx, item, parent).render_into(f).unwrap();
+        document_item_info(cx, item, parent).render_into(f)?;
         if parent.is_none() {
             write!(f, "{}", document_full_collapsible(item, cx, heading_offset))
         } else {
@@ -555,20 +554,18 @@ fn render_markdown(
     heading_offset: HeadingOffset,
 ) -> impl fmt::Display {
     fmt::from_fn(move |f| {
-        write!(
-            f,
-            "<div class=\"docblock\">{}</div>",
-            Markdown {
-                content: md_text,
-                links: &links,
-                ids: &mut cx.id_map.borrow_mut(),
-                error_codes: cx.shared.codes,
-                edition: cx.shared.edition(),
-                playground: &cx.shared.playground,
-                heading_offset,
-            }
-            .into_string()
-        )
+        f.write_str("<div class=\"docblock\">")?;
+        Markdown {
+            content: md_text,
+            links: &links,
+            ids: &mut cx.id_map.borrow_mut(),
+            error_codes: cx.shared.codes,
+            edition: cx.shared.edition(),
+            playground: &cx.shared.playground,
+            heading_offset,
+        }
+        .write_into(&mut *f)?;
+        f.write_str("</div>")
     })
 }
 
@@ -582,7 +579,7 @@ fn document_short(
     show_def_docs: bool,
 ) -> impl fmt::Display {
     fmt::from_fn(move |f| {
-        document_item_info(cx, item, Some(parent)).render_into(f).unwrap();
+        document_item_info(cx, item, Some(parent)).render_into(f)?;
         if !show_def_docs {
             return Ok(());
         }
@@ -661,7 +658,7 @@ fn document_full_inner(
         };
 
         if let clean::ItemKind::FunctionItem(..) | clean::ItemKind::MethodItem(..) = kind {
-            render_call_locations(f, cx, item);
+            render_call_locations(f, cx, item)?;
         }
         Ok(())
     })
@@ -752,7 +749,7 @@ fn short_item_info(
             let mut id_map = cx.id_map.borrow_mut();
             let html = MarkdownItemInfo(note, &mut id_map);
             message.push_str(": ");
-            message.push_str(&html.into_string());
+            html.write_into(&mut message).unwrap();
         }
         extra_info.push(ShortItemInfo::Deprecation { message });
     }
@@ -1201,11 +1198,29 @@ fn render_attributes_in_pre(it: &clean::Item, prefix: &str, cx: &Context<'_>) ->
     })
 }
 
+struct CodeAttribute(String);
+
+fn render_code_attribute(code_attr: CodeAttribute, w: &mut impl fmt::Write) {
+    write!(w, "<div class=\"code-attribute\">{}</div>", code_attr.0).unwrap();
+}
+
 // When an attribute is rendered inside a <code> tag, it is formatted using
 // a div to produce a newline after it.
 fn render_attributes_in_code(w: &mut impl fmt::Write, it: &clean::Item, cx: &Context<'_>) {
     for attr in it.attributes(cx.tcx(), cx.cache(), false) {
-        write!(w, "<div class=\"code-attribute\">{attr}</div>").unwrap();
+        render_code_attribute(CodeAttribute(attr), w);
+    }
+}
+
+/// used for type aliases to only render their `repr` attribute.
+fn render_repr_attributes_in_code(
+    w: &mut impl fmt::Write,
+    cx: &Context<'_>,
+    def_id: DefId,
+    item_type: ItemType,
+) {
+    if let Some(repr) = clean::repr_attributes(cx.tcx(), cx.cache(), def_id, item_type, false) {
+        render_code_attribute(CodeAttribute(repr), w);
     }
 }
 
@@ -1929,7 +1944,7 @@ fn render_impl(
         // 3. Functions
         //
         // This order is because you can have associated constants used in associated types (like array
-        // length), and both in associcated functions. So with this order, when reading from top to
+        // length), and both in associated functions. So with this order, when reading from top to
         // bottom, you should see items definitions before they're actually used most of the time.
         let mut assoc_types = Vec::new();
         let mut methods = Vec::new();
@@ -2530,7 +2545,7 @@ fn item_ty_to_section(ty: ItemType) -> ItemSection {
 /// types are re-exported, we don't use the corresponding
 /// entry from the js file, as inlining will have already
 /// picked up the impl
-fn collect_paths_for_type(first_ty: clean::Type, cache: &Cache) -> Vec<String> {
+fn collect_paths_for_type(first_ty: &clean::Type, cache: &Cache) -> Vec<String> {
     let mut out = Vec::new();
     let mut visited = FxHashSet::default();
     let mut work = VecDeque::new();
@@ -2547,7 +2562,7 @@ fn collect_paths_for_type(first_ty: clean::Type, cache: &Cache) -> Vec<String> {
     work.push_back(first_ty);
 
     while let Some(ty) = work.pop_front() {
-        if !visited.insert(ty.clone()) {
+        if !visited.insert(ty) {
             continue;
         }
 
@@ -2557,16 +2572,16 @@ fn collect_paths_for_type(first_ty: clean::Type, cache: &Cache) -> Vec<String> {
                 work.extend(tys.into_iter());
             }
             clean::Type::Slice(ty) => {
-                work.push_back(*ty);
+                work.push_back(ty);
             }
             clean::Type::Array(ty, _) => {
-                work.push_back(*ty);
+                work.push_back(ty);
             }
             clean::Type::RawPointer(_, ty) => {
-                work.push_back(*ty);
+                work.push_back(ty);
             }
             clean::Type::BorrowedRef { type_, .. } => {
-                work.push_back(*type_);
+                work.push_back(type_);
             }
             clean::Type::QPath(box clean::QPathData { self_type, trait_, .. }) => {
                 work.push_back(self_type);
@@ -2584,11 +2599,15 @@ const MAX_FULL_EXAMPLES: usize = 5;
 const NUM_VISIBLE_LINES: usize = 10;
 
 /// Generates the HTML for example call locations generated via the --scrape-examples flag.
-fn render_call_locations<W: fmt::Write>(mut w: W, cx: &Context<'_>, item: &clean::Item) {
+fn render_call_locations<W: fmt::Write>(
+    mut w: W,
+    cx: &Context<'_>,
+    item: &clean::Item,
+) -> fmt::Result {
     let tcx = cx.tcx();
     let def_id = item.item_id.expect_def_id();
     let key = tcx.def_path_hash(def_id);
-    let Some(call_locations) = cx.shared.call_locations.get(&key) else { return };
+    let Some(call_locations) = cx.shared.call_locations.get(&key) else { return Ok(()) };
 
     // Generate a unique ID so users can link to this section for a given method
     let id = cx.derive_id("scraped-examples");
@@ -2602,8 +2621,7 @@ fn render_call_locations<W: fmt::Write>(mut w: W, cx: &Context<'_>, item: &clean
           </h5>",
         root_path = cx.root_path(),
         id = id
-    )
-    .unwrap();
+    )?;
 
     // Create a URL to a particular location in a reverse-dependency's source file
     let link_to_loc = |call_data: &CallData, loc: &CallLocation| -> (String, String) {
@@ -2705,7 +2723,8 @@ fn render_call_locations<W: fmt::Write>(mut w: W, cx: &Context<'_>, item: &clean
                 title: init_title,
                 locations: locations_encoded,
             }),
-        );
+        )
+        .unwrap();
 
         true
     };
@@ -2761,8 +2780,7 @@ fn render_call_locations<W: fmt::Write>(mut w: W, cx: &Context<'_>, item: &clean
                   <div class=\"hide-more\">Hide additional examples</div>\
                   <div class=\"more-scraped-examples\">\
                     <div class=\"toggle-line\"><div class=\"toggle-line-inner\"></div></div>"
-        )
-        .unwrap();
+        )?;
 
         // Only generate inline code for MAX_FULL_EXAMPLES number of examples. Otherwise we could
         // make the page arbitrarily huge!
@@ -2774,9 +2792,8 @@ fn render_call_locations<W: fmt::Write>(mut w: W, cx: &Context<'_>, item: &clean
         if it.peek().is_some() {
             w.write_str(
                 r#"<div class="example-links">Additional examples can be found in:<br><ul>"#,
-            )
-            .unwrap();
-            it.for_each(|(_, call_data)| {
+            )?;
+            it.try_for_each(|(_, call_data)| {
                 let (url, _) = link_to_loc(call_data, &call_data.locations[0]);
                 write!(
                     w,
@@ -2784,13 +2801,12 @@ fn render_call_locations<W: fmt::Write>(mut w: W, cx: &Context<'_>, item: &clean
                     url = url,
                     name = call_data.display_name
                 )
-                .unwrap();
-            });
-            w.write_str("</ul></div>").unwrap();
+            })?;
+            w.write_str("</ul></div>")?;
         }
 
-        w.write_str("</div></details>").unwrap();
+        w.write_str("</div></details>")?;
     }
 
-    w.write_str("</div>").unwrap();
+    w.write_str("</div>")
 }

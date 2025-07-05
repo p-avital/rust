@@ -7,8 +7,9 @@ use stable_mir::crate_def::{CrateDef, CrateDefItems, CrateDefType};
 use stable_mir::mir::alloc::{AllocId, read_target_int, read_target_uint};
 use stable_mir::mir::mono::StaticDef;
 use stable_mir::target::MachineInfo;
-use stable_mir::{Filename, Opaque};
+use stable_mir::{Filename, IndexedVal, Opaque};
 
+use super::abi::ReprOptions;
 use super::mir::{Body, Mutability, Safety};
 use super::{DefId, Error, Symbol, with};
 use crate::stable_mir;
@@ -295,6 +296,12 @@ pub struct LineInfo {
     pub start_col: usize,
     pub end_line: usize,
     pub end_col: usize,
+}
+
+impl LineInfo {
+    pub fn from(lines: (usize, usize, usize, usize)) -> Self {
+        LineInfo { start_line: lines.0, start_col: lines.1, end_line: lines.2, end_col: lines.3 }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -742,9 +749,29 @@ crate_def! {
     pub ClosureDef;
 }
 
+impl ClosureDef {
+    /// Retrieves the body of the closure definition. Returns None if the body
+    /// isn't available.
+    pub fn body(&self) -> Option<Body> {
+        with(|ctx| ctx.has_body(self.0).then(|| ctx.mir_body(self.0)))
+    }
+}
+
 crate_def! {
     #[derive(Serialize)]
     pub CoroutineDef;
+}
+
+impl CoroutineDef {
+    /// Retrieves the body of the coroutine definition. Returns None if the body
+    /// isn't available.
+    pub fn body(&self) -> Option<Body> {
+        with(|cx| cx.has_body(self.0).then(|| cx.mir_body(self.0)))
+    }
+
+    pub fn discriminant_for_variant(&self, args: &GenericArgs, idx: VariantIdx) -> Discr {
+        with(|cx| cx.coroutine_discr_for_variant(*self, args, idx))
+    }
 }
 
 crate_def! {
@@ -818,6 +845,19 @@ impl AdtDef {
     pub fn variant(&self, idx: VariantIdx) -> Option<VariantDef> {
         (idx.to_index() < self.num_variants()).then_some(VariantDef { idx, adt_def: *self })
     }
+
+    pub fn repr(&self) -> ReprOptions {
+        with(|cx| cx.adt_repr(*self))
+    }
+
+    pub fn discriminant_for_variant(&self, idx: VariantIdx) -> Discr {
+        with(|cx| cx.adt_discr_for_variant(*self, idx))
+    }
+}
+
+pub struct Discr {
+    pub val: u128,
+    pub ty: Ty,
 }
 
 /// Definition of a variant, which can be either a struct / union field or an enum variant.
@@ -1098,6 +1138,8 @@ pub enum Abi {
     RustCold,
     RiscvInterruptM,
     RiscvInterruptS,
+    RustInvalid,
+    Custom,
 }
 
 /// A binder represents a possibly generic type and its bound vars.
@@ -1169,7 +1211,6 @@ pub enum BoundRegionKind {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum DynKind {
     Dyn,
-    DynStar,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1522,15 +1563,9 @@ pub enum PredicatePolarity {
     Negative,
 }
 
-pub trait IndexedVal {
-    fn to_val(index: usize) -> Self;
-
-    fn to_index(&self) -> usize;
-}
-
 macro_rules! index_impl {
     ($name:ident) => {
-        impl IndexedVal for $name {
+        impl stable_mir::IndexedVal for $name {
             fn to_val(index: usize) -> Self {
                 $name(index)
             }
@@ -1565,7 +1600,7 @@ pub struct VariantIdx(usize);
 index_impl!(VariantIdx);
 
 crate_def! {
-    /// Hold infomation about an Opaque definition, particularly useful in `RPITIT`.
+    /// Hold information about an Opaque definition, particularly useful in `RPITIT`.
     #[derive(Serialize)]
     pub OpaqueDef;
 }

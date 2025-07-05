@@ -1,6 +1,11 @@
 # This file's format is documented at
 # https://forge.rust-lang.org/triagebot/pr-assignment.html#configuration
 
+
+# ------------------------------------------------------------------------------
+# Labels
+# ------------------------------------------------------------------------------
+
 [relabel]
 allow-unauthenticated = [
     "A-*",
@@ -44,30 +49,10 @@ remove_labels = ["S-waiting-on-author"]
 # Those labels are added when PR author requests a review from an assignee
 add_labels = ["S-waiting-on-review"]
 
-[glacier]
 
-[ping.icebreakers-llvm]
-message = """\
-Hey LLVM ICE-breakers! This bug has been identified as a good
-"LLVM ICE-breaking candidate". In case it's useful, here are some
-[instructions] for tackling these sorts of bugs. Maybe take a look?
-Thanks! <3
-
-[instructions]: https://rustc-dev-guide.rust-lang.org/notification-groups/llvm.html
-"""
-label = "ICEBreaker-LLVM"
-
-[ping.icebreakers-cleanup-crew]
-alias = ["cleanup", "cleanups", "cleanup-crew", "shrink", "reduce", "bisect"]
-message = """\
-Hey Cleanup Crew ICE-breakers! This bug has been identified as a good
-"Cleanup ICE-breaking candidate". In case it's useful, here are some
-[instructions] for tackling these sorts of bugs. Maybe take a look?
-Thanks! <3
-
-[instructions]: https://rustc-dev-guide.rust-lang.org/notification-groups/cleanup-crew.html
-"""
-label = "ICEBreaker-Cleanup-Crew"
+# ------------------------------------------------------------------------------
+# Ping groups
+# ------------------------------------------------------------------------------
 
 [ping.windows]
 message = """\
@@ -133,7 +118,7 @@ In case it's useful, here are some [instructions] for tackling these sorts of is
 
 [instructions]: https://rustc-dev-guide.rust-lang.org/notification-groups/rust-for-linux.html
 """
-label = "O-rfl"
+label = "A-rust-for-linux"
 
 [ping.wasm]
 alias = ["webassembly"]
@@ -177,6 +162,11 @@ message = """\
 Hi relnotes-interest-group, this issue/PR could use some help in reviewing /
 adjusting release notes. Could you take a look if available? Thanks <3
 """
+
+
+# ------------------------------------------------------------------------------
+# Autolabels
+# ------------------------------------------------------------------------------
 
 [prioritize]
 label = "I-prioritize"
@@ -252,6 +242,11 @@ trigger_files = [
     "compiler/rustc_passes/src/check_attr.rs",
     "compiler/rustc_attr_parsing",
     "compiler/rustc_attr_data_structures",
+]
+
+[autolabel."A-compiler-builtins"]
+trigger_files = [
+    "library/compiler-builtins",
 ]
 
 [autolabel."F-autodiff"]
@@ -595,6 +590,18 @@ trigger_files = [
     "src/doc/rustc-dev-guide",
 ]
 
+[autolabel."A-LLVM"]
+trigger_files = [
+    "src/llvm-project",
+    "compiler/rustc_llvm",
+    "compiler/rustc_codegen_llvm",
+]
+
+
+# ------------------------------------------------------------------------------
+# Prioritization and team nominations
+# ------------------------------------------------------------------------------
+
 [notify-zulip."I-prioritize"]
 zulip_stream = 245100 # #t-compiler/prioritization/alerts
 topic = "#{number} {title}"
@@ -610,6 +617,21 @@ message_on_add = """\
 message_on_remove = "Issue #{number}'s prioritization request has been removed."
 message_on_close = "Issue #{number} has been closed while requested for prioritization."
 message_on_reopen = "Issue #{number} has been reopened."
+
+[notify-zulip."I-types-nominated"]
+zulip_stream = 326866 # #T-types/nominated
+topic = "#{number}: {title}"
+message_on_add = """\
+@*T-types* issue #{number} "{title}" has been nominated for team discussion.
+"""
+message_on_remove = "Issue #{number}'s nomination has been removed. Thanks all for participating!"
+message_on_close = "Issue #{number} has been closed. Thanks for participating!"
+message_on_reopen = "Issue #{number} has been reopened. Pinging @*T-types*."
+
+
+# ------------------------------------------------------------------------------
+# Zulip notifications
+# ------------------------------------------------------------------------------
 
 [notify-zulip."beta-nominated".rustdoc]
 required_labels = ["T-rustdoc"]
@@ -674,15 +696,6 @@ message_on_remove = "PR #{number}'s stable-acceptance has been **removed**."
 message_on_close = "PR #{number} has been closed. Thanks for participating!"
 message_on_reopen = "PR #{number} has been reopened. Pinging @*T-rustdoc*."
 
-[notify-zulip."I-types-nominated"]
-zulip_stream = 326866 # #T-types/nominated
-topic = "#{number}: {title}"
-message_on_add = """\
-@*T-types* issue #{number} "{title}" has been nominated for team discussion.
-"""
-message_on_remove = "Issue #{number}'s nomination has been removed. Thanks all for participating!"
-message_on_close = "Issue #{number} has been closed. Thanks for participating!"
-message_on_reopen = "Issue #{number} has been reopened. Pinging @*T-types*."
 
 [notify-zulip."beta-nominated".compiler]
 required_labels = ["T-compiler"]
@@ -700,6 +713,13 @@ don't know
 """,
 ]
 message_on_remove = "PR #{number}'s beta-nomination has been removed."
+
+[notify-zulip."beta-accepted".compiler]
+required_labels = ["T-compiler"]
+zulip_stream = 474880 # #t-compiler/backports
+# Put it in the same thread as beta-nominated.
+topic = "#{number}: beta-nominated"
+message_on_add = "PR #{number} has been **accepted** for **beta** backport."
 
 [notify-zulip."stable-nominated".compiler]
 required_labels = ["T-compiler"]
@@ -719,6 +739,64 @@ don't know
 ]
 message_on_remove = "PR #{number}'s stable-nomination has been removed."
 
+[notify-zulip."stable-accepted".compiler]
+required_labels = ["T-compiler"]
+zulip_stream = 474880 # #t-compiler/backports
+# Put it in the same thread as stable-nominated.
+topic = "#{number}: stable-nominated"
+message_on_add = "PR #{number} has been **accepted** for **stable** backport."
+
+
+[notify-zulip."beta-nominated".bootstrap]
+required_labels = ["T-bootstrap"]
+zulip_stream = 507486 # #t-infra/bootstrap/backports
+topic = "#{number}: beta-nominated"
+message_on_add = [
+    """\
+@*T-bootstrap* PR #{number} "{title}" has been nominated for beta backport.
+""",
+    """\
+/poll Approve beta backport of #{number}?
+approve
+decline
+don't know
+""",
+]
+message_on_remove = "PR #{number}'s beta-nomination has been removed."
+
+[notify-zulip."beta-accepted".bootstrap]
+required_labels = ["T-bootstrap"]
+zulip_stream = 507486 # #t-infra/bootstrap/backports
+# Put it in the same thread as beta-nominated.
+topic = "#{number}: beta-nominated"
+message_on_add = "PR #{number} has been **accepted** for **beta** backport."
+
+[notify-zulip."stable-nominated".bootstrap]
+required_labels = ["T-bootstrap"]
+zulip_stream = 507486 # #t-infra/bootstrap/backports
+topic = "#{number}: stable-nominated"
+message_on_add = [
+    """\
+@*T-bootstrap* PR #{number} "{title}" has been nominated for stable backport.
+""",
+    """\
+/poll Approve stable backport of #{number}?
+approve
+approve (but does not justify new dot release on its own)
+decline
+don't know
+""",
+]
+message_on_remove = "PR #{number}'s stable-nomination has been removed."
+
+[notify-zulip."stable-accepted".bootstrap]
+required_labels = ["T-bootstrap"]
+zulip_stream = 507486 # #t-infra/bootstrap/backports
+# Put it in the same thread as stable-nominated.
+topic = "#{number}: stable-nominated"
+message_on_add = "PR #{number} has been **accepted** for **stable** backport."
+
+
 [notify-zulip."A-edition-2021"]
 required_labels = ["C-bug"]
 zulip_stream = 268952 # #edition
@@ -735,17 +813,10 @@ message_on_add = """\
 Issue #{number} "{title}" has been added.
 """
 
-[no-merges]
-exclude_titles = ["Rollup of", "subtree update", "Subtree update"]
-labels = ["has-merge-commits", "S-waiting-on-author"]
 
-[github-releases]
-format = "rustc"
-project-name = "Rust"
-changelog-path = "RELEASES.md"
-changelog-branch = "master"
-
-[shortcut]
+# ------------------------------------------------------------------------------
+# Mentions
+# ------------------------------------------------------------------------------
 
 [mentions."triagebot.toml"]
 message = "`triagebot.toml` has been modified, there may have been changes to the review queue."
@@ -851,6 +922,15 @@ cc = ["@Urgau"]
 message = "Some changes occurred in check-cfg diagnostics"
 cc = ["@Urgau"]
 
+[mentions."library/compiler-builtins"]
+message = """
+`compiler-builtins` is developed in its own repository. If possible, consider \
+making this change to \
+[rust-lang/compiler-builtins](https://github.com/rust-lang/compiler-builtins) \
+instead.
+"""
+cc = ["@tgross35"]
+
 [mentions."library/core/src/intrinsics/simd.rs"]
 message = """
 Some changes occurred to the platform-builtins intrinsics. Make sure the
@@ -887,6 +967,7 @@ message = "Some changes occurred in HTML/CSS/JS."
 cc = [
     "@GuillaumeGomez",
     "@jsha",
+    "@lolbinarycat",
 ]
 
 [mentions."tests/rustdoc-gui/"]
@@ -990,6 +1071,10 @@ Otherwise, you can ignore this comment.
 
 [mentions."src/tools/x"]
 message = "`src/tools/x` was changed. Bump version of Cargo.toml in `src/tools/x` so tidy will suggest installing the new version."
+
+[mentions."src/tools/tidy"]
+message = "There are changes to the `tidy` tool."
+cc = ["@jieyouxu"]
 
 [mentions."src/tools/tidy/src/deps.rs"]
 message = "The list of allowed third-party dependencies may have been modified! You must ensure that any new dependencies have compatible licenses before merging."
@@ -1132,7 +1217,7 @@ cc = ["@ehuss"]
 
 [mentions."src/doc/rustc-dev-guide"]
 message = "The rustc-dev-guide subtree was changed. If this PR *only* touches the dev guide consider submitting a PR directly to [rust-lang/rustc-dev-guide](https://github.com/rust-lang/rustc-dev-guide/pulls) otherwise thank you for updating the dev guide with your changes."
-cc = ["@BoxyUwU", "@jieyouxu", "@kobzol"]
+cc = ["@BoxyUwU", "@jieyouxu", "@kobzol", "@tshepang"]
 
 [mentions."compiler/rustc_codegen_ssa/src/codegen_attrs.rs"]
 cc = ["@jdonszelmann"]
@@ -1165,15 +1250,14 @@ cc = ["@m-ou-se"]
 [mentions."compiler/rustc_ast_lowering/src/format.rs"]
 cc = ["@m-ou-se"]
 
+
+# ------------------------------------------------------------------------------
+# PR assignments
+# ------------------------------------------------------------------------------
+
 [assign]
 warn_non_default_branch.enable = true
 contributing_url = "https://rustc-dev-guide.rust-lang.org/getting-started.html"
-users_on_vacation = [
-    "fmease",
-    "jyn514",
-    "Noratrieb",
-    "spastorino",
-]
 
 [[assign.warn_non_default_branch.exceptions]]
 title = "[beta"
@@ -1192,35 +1276,27 @@ compiler = [
     "@BoxyUwU",
     "@compiler-errors",
     "@davidtwco",
+    "@eholk",
     "@fee1-dead",
     "@fmease",
     "@jieyouxu",
+    "@jdonszelmann",
     "@lcnr",
     "@Nadrieril",
     "@nnethercote",
-    "@Noratrieb",
     "@oli-obk",
     "@petrochenkov",
     "@SparrowLii",
+    "@WaffleLapkin",
     "@wesleywiser",
 ]
 libs = [
     "@Mark-Simulacrum",
-    "@Noratrieb",
     "@workingjubilee",
-    "@joboet",
     "@jhpratt",
     "@tgross35",
     "@thomcc",
     "@ibraheemdev",
-]
-bootstrap = [
-    "@Mark-Simulacrum",
-    "@albertlarsan68",
-    "@onur-ozkan",
-    "@kobzol",
-    "@jieyouxu",
-    "@clubby789",
 ]
 infra-ci = [
     "@Mark-Simulacrum",
@@ -1241,6 +1317,7 @@ codegen = [
     "@dianqk",
     "@saethlin",
     "@workingjubilee",
+    "@WaffleLapkin",
 ]
 query-system = [
     "@oli-obk",
@@ -1327,6 +1404,9 @@ project-exploit-mitigations = [
 compiletest = [
     "@jieyouxu",
 ]
+dep-bumps = [
+    "@clubby789",
+]
 
 [assign.owners]
 "/.github/workflows" =                                   ["infra-ci"]
@@ -1410,12 +1490,31 @@ compiletest = [
 "/src/tools/rustdoc-themes" =                            ["rustdoc"]
 "/src/tools/tidy" =                                      ["bootstrap"]
 "/src/tools/x" =                                         ["bootstrap"]
-"/src/tools/rustdoc-gui-test" =                          ["bootstrap", "@onur-ozkan"]
-"/src/tools/libcxx-version" =                            ["@onur-ozkan"]
+"/src/tools/rustdoc-gui-test" =                          ["bootstrap"]
+"/src/tools/libcxx-version" =                            ["bootstrap"]
 
-# Enable tracking of PR review assignment
-# Documentation at: https://forge.rust-lang.org/triagebot/pr-assignment-tracking.html
+# Enable review queue tracking
+# Documentation at: https://forge.rust-lang.org/triagebot/review-queue-tracking.html
+[assign.review_prefs]
+
 [pr-tracking]
+
+
+# ------------------------------------------------------------------------------
+# Misc
+# ------------------------------------------------------------------------------
+
+[no-merges]
+exclude_titles = ["Rollup of", "subtree update", "Subtree update"]
+labels = ["has-merge-commits", "S-waiting-on-author"]
+
+[github-releases]
+format = "rustc"
+project-name = "Rust"
+changelog-path = "RELEASES.md"
+changelog-branch = "master"
+
+[shortcut]
 
 # Enable issue transfers within the org
 # Documentation at: https://forge.rust-lang.org/triagebot/transfer.html
@@ -1424,3 +1523,20 @@ compiletest = [
 # Enable `@rustbot note` functionality
 # Documentation at: https://forge.rust-lang.org/triagebot/note.html
 [note]
+
+[behind-upstream]
+days-threshold = 14
+
+# Canonicalize issue numbers to avoid closing the wrong issue
+# when commits are included in subtrees, as well as warning links in commits.
+# Documentation at: https://forge.rust-lang.org/triagebot/issue-links.html
+[issue-links]
+
+# Prevents mentions in commits to avoid users being spammed
+# Documentation at: https://forge.rust-lang.org/triagebot/no-mentions.html
+[no-mentions]
+
+# Allow members to formally register concerns (`@rustbot concern my concern`)
+# Documentation at: https://forge.rust-lang.org/triagebot/concern.html
+[concern]
+labels = ["S-waiting-on-concerns"]

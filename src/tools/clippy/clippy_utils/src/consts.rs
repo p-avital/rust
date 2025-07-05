@@ -4,8 +4,6 @@
 //! executable MIR bodies, so we have to do this instead.
 #![allow(clippy::float_cmp)]
 
-use std::sync::Arc;
-
 use crate::source::{SpanRangeExt, walk_span_to_context};
 use crate::{clip, is_direct_expn_of, sext, unsext};
 
@@ -38,7 +36,7 @@ pub enum Constant<'tcx> {
     /// A `String` (e.g., "abc").
     Str(String),
     /// A binary string (e.g., `b"abc"`).
-    Binary(Arc<[u8]>),
+    Binary(Vec<u8>),
     /// A single `char` (e.g., `'a'`).
     Char(char),
     /// An integer's bit representation.
@@ -235,9 +233,7 @@ impl Constant<'_> {
                 _ => None,
             },
             (Self::Vec(l), Self::Vec(r)) => {
-                let (ty::Array(cmp_type, _) | ty::Slice(cmp_type)) = *cmp_type.kind() else {
-                    return None;
-                };
+                let cmp_type = cmp_type.builtin_index()?;
                 iter::zip(l, r)
                     .map(|(li, ri)| Self::partial_cmp(tcx, cmp_type, li, ri))
                     .find(|r| r.is_none_or(|o| o != Ordering::Equal))
@@ -308,7 +304,9 @@ pub fn lit_to_mir_constant<'tcx>(lit: &LitKind, ty: Option<Ty<'tcx>>) -> Constan
     match *lit {
         LitKind::Str(ref is, _) => Constant::Str(is.to_string()),
         LitKind::Byte(b) => Constant::Int(u128::from(b)),
-        LitKind::ByteStr(ref s, _) | LitKind::CStr(ref s, _) => Constant::Binary(Arc::clone(s)),
+        LitKind::ByteStr(ref s, _) | LitKind::CStr(ref s, _) => {
+            Constant::Binary(s.as_byte_str().to_vec())
+        }
         LitKind::Char(c) => Constant::Char(c),
         LitKind::Int(n, _) => Constant::Int(n.get()),
         LitKind::Float(ref is, LitFloatType::Suffixed(fty)) => match fty {
@@ -487,7 +485,7 @@ impl<'tcx> ConstEvalCtxt<'tcx> {
             ExprKind::Path(ref qpath) => self.qpath(qpath, e.hir_id),
             ExprKind::Block(block, _) => self.block(block),
             ExprKind::Lit(lit) => {
-                if is_direct_expn_of(e.span, "cfg").is_some() {
+                if is_direct_expn_of(e.span, sym::cfg).is_some() {
                     None
                 } else {
                     Some(lit_to_mir_constant(&lit.node, self.typeck.expr_ty_opt(e)))
@@ -565,12 +563,14 @@ impl<'tcx> ConstEvalCtxt<'tcx> {
                 })
             },
             ExprKind::Lit(lit) => {
-                if is_direct_expn_of(e.span, "cfg").is_some() {
+                if is_direct_expn_of(e.span, sym::cfg).is_some() {
                     None
                 } else {
                     match &lit.node {
                         LitKind::Str(is, _) => Some(is.is_empty()),
-                        LitKind::ByteStr(s, _) | LitKind::CStr(s, _) => Some(s.is_empty()),
+                        LitKind::ByteStr(s, _) | LitKind::CStr(s, _) => {
+                            Some(s.as_byte_str().is_empty())
+                        }
                         _ => None,
                     }
                 }
@@ -654,7 +654,7 @@ impl<'tcx> ConstEvalCtxt<'tcx> {
                         span,
                         ..
                     }) = self.tcx.hir_node(body_id.hir_id)
-                    && is_direct_expn_of(*span, "cfg").is_some()
+                    && is_direct_expn_of(*span, sym::cfg).is_some()
                 {
                     return None;
                 }
@@ -959,4 +959,19 @@ fn field_of_struct<'tcx>(
     } else {
         None
     }
+}
+
+/// If `expr` evaluates to an integer constant, return its value.
+pub fn integer_const(cx: &LateContext<'_>, expr: &Expr<'_>) -> Option<u128> {
+    if let Some(Constant::Int(value)) = ConstEvalCtxt::new(cx).eval_simple(expr) {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+/// Check if `expr` evaluates to an integer constant of 0.
+#[inline]
+pub fn is_zero_integer_const(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
+    integer_const(cx, expr) == Some(0)
 }

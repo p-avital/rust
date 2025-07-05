@@ -2,11 +2,12 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use either::{Left, Right};
 use rustc_abi::{self as abi, BackendRepr};
+use rustc_errors::E0080;
 use rustc_hir::def::DefKind;
 use rustc_middle::mir::interpret::{AllocId, ErrorHandled, InterpErrorInfo, ReportedErrorInfo};
 use rustc_middle::mir::{self, ConstAlloc, ConstValue};
 use rustc_middle::query::TyCtxtAt;
-use rustc_middle::ty::layout::{HasTypingEnv, LayoutOf};
+use rustc_middle::ty::layout::HasTypingEnv;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_middle::{bug, throw_inval};
@@ -19,7 +20,7 @@ use crate::const_eval::CheckAlignment;
 use crate::interpret::{
     CtfeValidationMode, GlobalId, Immediate, InternKind, InternResult, InterpCx, InterpErrorKind,
     InterpResult, MPlaceTy, MemoryKind, OpTy, RefTracking, StackPopCleanup, create_static_alloc,
-    eval_nullary_intrinsic, intern_const_alloc_recursive, interp_ok, throw_exhaust,
+    intern_const_alloc_recursive, interp_ok, throw_exhaust,
 };
 use crate::{CTRL_C_RECEIVED, errors};
 
@@ -71,7 +72,12 @@ fn eval_body_using_ecx<'tcx, R: InterpretationResult<'tcx>>(
 
     // This can't use `init_stack_frame` since `body` is not a function,
     // so computing its ABI would fail. It's also not worth it since there are no arguments to pass.
-    ecx.push_stack_frame_raw(cid.instance, body, &ret, StackPopCleanup::Root { cleanup: false })?;
+    ecx.push_stack_frame_raw(
+        cid.instance,
+        body,
+        &ret.clone().into(),
+        StackPopCleanup::Root { cleanup: false },
+    )?;
     ecx.storage_live_for_always_live_locals()?;
 
     // The main interpreter loop.
@@ -203,9 +209,9 @@ pub(super) fn op_to_const<'tcx>(
 
     match immediate {
         Left(ref mplace) => {
-            // We know `offset` is relative to the allocation, so we can use `into_parts`.
-            let (prov, offset) = mplace.ptr().into_parts();
-            let alloc_id = prov.expect("cannot have `fake` place for non-ZST type").alloc_id();
+            let (prov, offset) =
+                mplace.ptr().into_pointer_or_addr().unwrap().prov_and_relative_offset();
+            let alloc_id = prov.alloc_id();
             ConstValue::Indirect { alloc_id, offset }
         }
         // see comment on `let force_as_immediate` above
@@ -226,9 +232,10 @@ pub(super) fn op_to_const<'tcx>(
                     imm.layout.ty,
                 );
                 let msg = "`op_to_const` on an immediate scalar pair must only be used on slice references to the beginning of an actual allocation";
-                // We know `offset` is relative to the allocation, so we can use `into_parts`.
-                let (prov, offset) = a.to_pointer(ecx).expect(msg).into_parts();
-                let alloc_id = prov.expect(msg).alloc_id();
+                let ptr = a.to_pointer(ecx).expect(msg);
+                let (prov, offset) =
+                    ptr.into_pointer_or_addr().expect(msg).prov_and_relative_offset();
+                let alloc_id = prov.alloc_id();
                 let data = ecx.tcx.global_alloc(alloc_id).unwrap_memory();
                 assert!(offset == abi::Size::ZERO, "{}", msg);
                 let meta = b.to_target_usize(ecx).expect(msg);
@@ -274,28 +281,6 @@ pub fn eval_to_const_value_raw_provider<'tcx>(
     tcx: TyCtxt<'tcx>,
     key: ty::PseudoCanonicalInput<'tcx, GlobalId<'tcx>>,
 ) -> ::rustc_middle::mir::interpret::EvalToConstValueResult<'tcx> {
-    // We call `const_eval` for zero arg intrinsics, too, in order to cache their value.
-    // Catch such calls and evaluate them instead of trying to load a constant's MIR.
-    if let ty::InstanceKind::Intrinsic(def_id) = key.value.instance.def {
-        let ty = key.value.instance.ty(tcx, key.typing_env);
-        let ty::FnDef(_, args) = ty.kind() else {
-            bug!("intrinsic with type {:?}", ty);
-        };
-        return eval_nullary_intrinsic(tcx, key.typing_env, def_id, args).report_err().map_err(
-            |error| {
-                let span = tcx.def_span(def_id);
-
-                super::report(
-                    tcx,
-                    error.into_kind(),
-                    span,
-                    || (span, vec![]),
-                    |span, _| errors::NullaryIntrinsicError { span },
-                )
-            },
-        );
-    }
-
     tcx.eval_to_allocation_raw(key).map(|val| turn_into_const_value(tcx, val, key))
 }
 
@@ -418,31 +403,24 @@ fn report_eval_error<'tcx>(
     let (error, backtrace) = error.into_parts();
     backtrace.print_backtrace();
 
-    let (kind, instance) = if ecx.tcx.is_static(cid.instance.def_id()) {
-        ("static", String::new())
-    } else {
-        // If the current item has generics, we'd like to enrich the message with the
-        // instance and its args: to show the actual compile-time values, in addition to
-        // the expression, leading to the const eval error.
-        let instance = &cid.instance;
-        if !instance.args.is_empty() {
-            let instance = with_no_trimmed_paths!(instance.to_string());
-            ("const_with_path", instance)
-        } else {
-            ("const", String::new())
-        }
-    };
+    let instance = with_no_trimmed_paths!(cid.instance.to_string());
 
     super::report(
         *ecx.tcx,
         error,
         DUMMY_SP,
         || super::get_span_and_frames(ecx.tcx, ecx.stack()),
-        |span, frames| errors::ConstEvalError {
-            span,
-            error_kind: kind,
-            instance,
-            frame_notes: frames,
+        |diag, span, frames| {
+            let num_frames = frames.len();
+            // FIXME(oli-obk): figure out how to use structured diagnostics again.
+            diag.code(E0080);
+            diag.span_label(span, crate::fluent_generated::const_eval_error);
+            for frame in frames {
+                diag.subdiagnostic(frame);
+            }
+            // Add after the frame rendering above, as it adds its own `instance` args.
+            diag.arg("instance", instance);
+            diag.arg("num_frames", num_frames);
         },
     )
 }
@@ -472,6 +450,15 @@ fn report_validation_error<'tcx>(
         error,
         DUMMY_SP,
         || crate::const_eval::get_span_and_frames(ecx.tcx, ecx.stack()),
-        move |span, frames| errors::ValidationFailure { span, ub_note: (), frames, raw_bytes },
+        move |diag, span, frames| {
+            // FIXME(oli-obk): figure out how to use structured diagnostics again.
+            diag.code(E0080);
+            diag.span_label(span, crate::fluent_generated::const_eval_validation_failure);
+            diag.note(crate::fluent_generated::const_eval_validation_failure_note);
+            for frame in frames {
+                diag.subdiagnostic(frame);
+            }
+            diag.subdiagnostic(raw_bytes);
+        },
     )
 }

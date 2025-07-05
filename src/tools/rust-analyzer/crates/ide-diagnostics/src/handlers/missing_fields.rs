@@ -47,6 +47,7 @@ pub(crate) fn missing_fields(ctx: &DiagnosticsContext<'_>, d: &hir::MissingField
     );
 
     Diagnostic::new_with_syntax_node_ptr(ctx, DiagnosticCode::RustcHardError("E0063"), message, ptr)
+        .stable()
         .with_fixes(fixes(ctx, d))
 }
 
@@ -105,7 +106,7 @@ fn fixes(ctx: &DiagnosticsContext<'_>, d: &hir::MissingFields) -> Option<Vec<Ass
                 }
             });
 
-            let generate_fill_expr = |ty: &Type| match ctx.config.expr_fill_default {
+            let generate_fill_expr = |ty: &Type<'_>| match ctx.config.expr_fill_default {
                 ExprFillDefaultMode::Todo => make::ext::expr_todo(),
                 ExprFillDefaultMode::Underscore => make::ext::expr_underscore(),
                 ExprFillDefaultMode::Default => {
@@ -179,7 +180,7 @@ fn fixes(ctx: &DiagnosticsContext<'_>, d: &hir::MissingFields) -> Option<Vec<Ass
 }
 
 fn make_ty(
-    ty: &hir::Type,
+    ty: &hir::Type<'_>,
     db: &dyn HirDatabase,
     module: hir::Module,
     edition: Edition,
@@ -197,7 +198,7 @@ fn make_ty(
 fn get_default_constructor(
     ctx: &DiagnosticsContext<'_>,
     d: &hir::MissingFields,
-    ty: &Type,
+    ty: &Type<'_>,
 ) -> Option<ast::Expr> {
     if let Some(builtin_ty) = ty.as_builtin() {
         if builtin_ty.is_int() || builtin_ty.is_uint() {

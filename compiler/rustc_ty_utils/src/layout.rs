@@ -449,14 +449,6 @@ fn layout_of_uncached<'tcx>(
             tcx.mk_layout(LayoutData::scalar_pair(cx, data_ptr, metadata))
         }
 
-        ty::Dynamic(_, _, ty::DynStar) => {
-            let mut data = scalar_unit(Pointer(AddressSpace::DATA));
-            data.valid_range_mut().start = 0;
-            let mut vtable = scalar_unit(Pointer(AddressSpace::DATA));
-            vtable.valid_range_mut().start = 1;
-            tcx.mk_layout(LayoutData::scalar_pair(cx, data, vtable))
-        }
-
         // Arrays and slices.
         ty::Array(element, count) => {
             let count = extract_const_value(cx, ty, count)?
@@ -492,9 +484,7 @@ fn layout_of_uncached<'tcx>(
         ty::Coroutine(def_id, args) => {
             use rustc_middle::ty::layout::PrimitiveExt as _;
 
-            let Some(info) = tcx.coroutine_layout(def_id, args) else {
-                return Err(error(cx, LayoutError::Unknown(ty)));
-            };
+            let info = tcx.coroutine_layout(def_id, args)?;
 
             let local_layouts = info
                 .field_tys
@@ -898,10 +888,9 @@ fn variant_info_for_coroutine<'tcx>(
                     variant_size = variant_size.max(offset + field_layout.size);
                     FieldInfo {
                         kind: FieldKind::CoroutineLocal,
-                        name: field_name.unwrap_or(Symbol::intern(&format!(
-                            ".coroutine_field{}",
-                            local.as_usize()
-                        ))),
+                        name: field_name.unwrap_or_else(|| {
+                            Symbol::intern(&format!(".coroutine_field{}", local.as_usize()))
+                        }),
                         offset: offset.bytes(),
                         size: field_layout.size.bytes(),
                         align: field_layout.align.abi.bytes(),
@@ -934,7 +923,7 @@ fn variant_info_for_coroutine<'tcx>(
             // However, if the discriminant is placed past the end of the variant, then we need
             // to factor in the size of the discriminant manually. This really should be refactored
             // better, but this "works" for now.
-            if layout.fields.offset(tag_field) >= variant_size {
+            if layout.fields.offset(tag_field.as_usize()) >= variant_size {
                 variant_size += match tag_encoding {
                     TagEncoding::Direct => tag.size(cx),
                     _ => Size::ZERO,
