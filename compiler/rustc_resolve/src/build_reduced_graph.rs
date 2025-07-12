@@ -18,6 +18,7 @@ use rustc_expand::base::ResolverExpand;
 use rustc_expand::expand::AstFragment;
 use rustc_hir::def::{self, *};
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
+use rustc_index::bit_set::DenseBitSet;
 use rustc_metadata::creader::LoadedMacro;
 use rustc_middle::metadata::ModChild;
 use rustc_middle::ty::Feed;
@@ -161,28 +162,30 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         }
     }
 
-    pub(crate) fn get_macro(&mut self, res: Res) -> Option<&MacroData> {
+    pub(crate) fn get_macro(&self, res: Res) -> Option<&'ra MacroData> {
         match res {
             Res::Def(DefKind::Macro(..), def_id) => Some(self.get_macro_by_def_id(def_id)),
-            Res::NonMacroAttr(_) => Some(&self.non_macro_attr),
+            Res::NonMacroAttr(_) => Some(self.non_macro_attr),
             _ => None,
         }
     }
 
-    pub(crate) fn get_macro_by_def_id(&mut self, def_id: DefId) -> &MacroData {
-        if self.macro_map.contains_key(&def_id) {
-            return &self.macro_map[&def_id];
+    pub(crate) fn get_macro_by_def_id(&self, def_id: DefId) -> &'ra MacroData {
+        // Local macros are always compiled.
+        match def_id.as_local() {
+            Some(local_def_id) => self.local_macro_map[&local_def_id],
+            None => *self.extern_macro_map.borrow_mut().entry(def_id).or_insert_with(|| {
+                let loaded_macro = self.cstore().load_macro_untracked(def_id, self.tcx);
+                let macro_data = match loaded_macro {
+                    LoadedMacro::MacroDef { def, ident, attrs, span, edition } => {
+                        self.compile_macro(&def, ident, &attrs, span, ast::DUMMY_NODE_ID, edition)
+                    }
+                    LoadedMacro::ProcMacro(ext) => MacroData::new(Arc::new(ext)),
+                };
+
+                self.arenas.alloc_macro(macro_data)
+            }),
         }
-
-        let loaded_macro = self.cstore().load_macro_untracked(def_id, self.tcx);
-        let macro_data = match loaded_macro {
-            LoadedMacro::MacroDef { def, ident, attrs, span, edition } => {
-                self.compile_macro(&def, ident, &attrs, span, ast::DUMMY_NODE_ID, edition)
-            }
-            LoadedMacro::ProcMacro(ext) => MacroData::new(Arc::new(ext)),
-        };
-
-        self.macro_map.entry(def_id).or_insert(macro_data)
     }
 
     pub(crate) fn build_reduced_graph(
@@ -823,7 +826,7 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
             }
 
             // These items live in both the type and value namespaces.
-            ItemKind::Struct(ident, ref vdata, _) => {
+            ItemKind::Struct(ident, _, ref vdata) => {
                 self.build_reduced_graph_for_struct_variant(
                     vdata.fields(),
                     ident,
@@ -874,7 +877,7 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
                 }
             }
 
-            ItemKind::Union(ident, ref vdata, _) => {
+            ItemKind::Union(ident, _, ref vdata) => {
                 self.build_reduced_graph_for_struct_variant(
                     vdata.fields(),
                     ident,
@@ -1098,22 +1101,20 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
             self.r.potentially_unused_imports.push(import);
             module.for_each_child(self, |this, ident, ns, binding| {
                 if ns == MacroNS {
-                    let imported_binding =
-                        if this.r.is_accessible_from(binding.vis, this.parent_scope.module) {
-                            this.r.import(binding, import)
-                        } else if !this.r.is_builtin_macro(binding.res())
-                            && !this.r.macro_use_prelude.contains_key(&ident.name)
-                        {
-                            // - `!r.is_builtin_macro(res)` excluding the built-in macros such as `Debug` or `Hash`.
-                            // - `!r.macro_use_prelude.contains_key(name)` excluding macros defined in other extern
-                            //    crates such as `std`.
-                            // FIXME: This branch should eventually be removed.
-                            let import = macro_use_import(this, span, true);
-                            this.r.import(binding, import)
-                        } else {
+                    let import = if this.r.is_accessible_from(binding.vis, this.parent_scope.module)
+                    {
+                        import
+                    } else {
+                        // FIXME: This branch is used for reporting the `private_macro_use` lint
+                        // and should eventually be removed.
+                        if this.r.macro_use_prelude.contains_key(&ident.name) {
+                            // Do not override already existing entries with compatibility entries.
                             return;
-                        };
-                    this.add_macro_use_binding(ident.name, imported_binding, span, allow_shadowing);
+                        }
+                        macro_use_import(this, span, true)
+                    };
+                    let import_binding = this.r.import(binding, import);
+                    this.add_macro_use_binding(ident.name, import_binding, span, allow_shadowing);
                 }
             });
         } else {
@@ -1204,13 +1205,8 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
     fn insert_unused_macro(&mut self, ident: Ident, def_id: LocalDefId, node_id: NodeId) {
         if !ident.as_str().starts_with('_') {
             self.r.unused_macros.insert(def_id, (node_id, ident));
-            for (rule_i, rule_span) in &self.r.macro_map[&def_id.to_def_id()].rule_spans {
-                self.r
-                    .unused_macro_rules
-                    .entry(node_id)
-                    .or_default()
-                    .insert(*rule_i, (ident, *rule_span));
-            }
+            let nrules = self.r.local_macro_map[&def_id].nrules;
+            self.r.unused_macro_rules.insert(node_id, DenseBitSet::new_filled(nrules));
         }
     }
 
@@ -1228,7 +1224,7 @@ impl<'a, 'ra, 'tcx> BuildReducedGraphVisitor<'a, 'ra, 'tcx> {
                     Some((macro_kind, ident, span)) => {
                         let res = Res::Def(DefKind::Macro(macro_kind), def_id.to_def_id());
                         let macro_data = MacroData::new(self.r.dummy_ext(macro_kind));
-                        self.r.macro_map.insert(def_id.to_def_id(), macro_data);
+                        self.r.new_local_macro(def_id, macro_data);
                         self.r.proc_macro_stubs.insert(def_id);
                         (res, ident, span, false)
                     }

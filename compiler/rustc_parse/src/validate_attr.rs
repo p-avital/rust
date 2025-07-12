@@ -180,9 +180,14 @@ pub fn check_attribute_safety(
             let diag_span = attr_item.span();
 
             // Attributes can be safe in earlier editions, and become unsafe in later ones.
+            //
+            // Use the span of the attribute's name to determine the edition: the span of the
+            // attribute as a whole may be inaccurate if it was emitted by a macro.
+            //
+            // See https://github.com/rust-lang/rust/issues/142182.
             let emit_error = match unsafe_since {
                 None => true,
-                Some(unsafe_since) => attr.span.edition() >= unsafe_since,
+                Some(unsafe_since) => path_span.edition() >= unsafe_since,
             };
 
             if emit_error {
@@ -262,6 +267,58 @@ pub fn check_builtin_meta_item(
     deny_unsafety: bool,
 ) {
     if !is_attr_template_compatible(&template, &meta.kind) {
+        // attrs with new parsers are locally validated so excluded here
+        if matches!(
+            name,
+            sym::inline
+                | sym::export_stable
+                | sym::ffi_const
+                | sym::ffi_pure
+                | sym::rustc_std_internal_symbol
+                | sym::may_dangle
+                | sym::rustc_as_ptr
+                | sym::rustc_pub_transparent
+                | sym::rustc_const_stable_indirect
+                | sym::rustc_force_inline
+                | sym::rustc_confusables
+                | sym::rustc_skip_during_method_dispatch
+                | sym::rustc_pass_by_value
+                | sym::rustc_deny_explicit_impl
+                | sym::rustc_do_not_implement_via_object
+                | sym::rustc_coinductive
+                | sym::const_trait
+                | sym::rustc_specialization_trait
+                | sym::rustc_unsafe_specialization_marker
+                | sym::rustc_allow_incoherent_impl
+                | sym::rustc_coherence_is_core
+                | sym::marker
+                | sym::fundamental
+                | sym::rustc_paren_sugar
+                | sym::type_const
+                | sym::repr
+                | sym::align
+                | sym::deprecated
+                | sym::optimize
+                | sym::cold
+                | sym::target_feature
+                | sym::rustc_allow_const_fn_unstable
+                | sym::naked
+                | sym::no_mangle
+                | sym::non_exhaustive
+                | sym::path
+                | sym::ignore
+                | sym::must_use
+                | sym::track_caller
+                | sym::link_name
+                | sym::export_name
+                | sym::rustc_macro_transparency
+                | sym::link_section
+                | sym::rustc_layout_scalar_valid_range_start
+                | sym::rustc_layout_scalar_valid_range_end
+                | sym::no_implicit_prelude
+        ) {
+            return;
+        }
         emit_malformed_attribute(psess, style, meta.span, name, template);
     }
 
@@ -279,9 +336,7 @@ fn emit_malformed_attribute(
 ) {
     // Some of previously accepted forms were used in practice,
     // report them as warnings for now.
-    let should_warn = |name| {
-        matches!(name, sym::doc | sym::ignore | sym::inline | sym::link | sym::test | sym::bench)
-    };
+    let should_warn = |name| matches!(name, sym::doc | sym::link | sym::test | sym::bench);
 
     let error_msg = format!("malformed `{name}` attribute input");
     let mut suggestions = vec![];

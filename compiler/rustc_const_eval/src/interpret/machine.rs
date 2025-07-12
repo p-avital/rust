@@ -18,8 +18,8 @@ use rustc_target::callconv::FnAbi;
 
 use super::{
     AllocBytes, AllocId, AllocKind, AllocRange, Allocation, CTFE_ALLOC_SALT, ConstAllocation,
-    CtfeProvenance, FnArg, Frame, ImmTy, InterpCx, InterpResult, MPlaceTy, MemoryKind,
-    Misalignment, OpTy, PlaceTy, Pointer, Provenance, RangeSet, interp_ok, throw_unsup,
+    CtfeProvenance, EnteredTraceSpan, FnArg, Frame, ImmTy, InterpCx, InterpResult, MPlaceTy,
+    MemoryKind, Misalignment, OpTy, PlaceTy, Pointer, Provenance, RangeSet, interp_ok, throw_unsup,
 };
 
 /// Data returned by [`Machine::after_stack_pop`], and consumed by
@@ -183,8 +183,8 @@ pub trait Machine<'tcx>: Sized {
     fn load_mir(
         ecx: &InterpCx<'tcx, Self>,
         instance: ty::InstanceKind<'tcx>,
-    ) -> InterpResult<'tcx, &'tcx mir::Body<'tcx>> {
-        interp_ok(ecx.tcx.instance_mir(instance))
+    ) -> &'tcx mir::Body<'tcx> {
+        ecx.tcx.instance_mir(instance)
     }
 
     /// Entry point to all function calls.
@@ -202,7 +202,7 @@ pub trait Machine<'tcx>: Sized {
         instance: ty::Instance<'tcx>,
         abi: &FnAbi<'tcx, Ty<'tcx>>,
         args: &[FnArg<'tcx, Self::Provenance>],
-        destination: &MPlaceTy<'tcx, Self::Provenance>,
+        destination: &PlaceTy<'tcx, Self::Provenance>,
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
     ) -> InterpResult<'tcx, Option<(&'tcx mir::Body<'tcx>, ty::Instance<'tcx>)>>;
@@ -214,7 +214,7 @@ pub trait Machine<'tcx>: Sized {
         fn_val: Self::ExtraFnVal,
         abi: &FnAbi<'tcx, Ty<'tcx>>,
         args: &[FnArg<'tcx, Self::Provenance>],
-        destination: &MPlaceTy<'tcx, Self::Provenance>,
+        destination: &PlaceTy<'tcx, Self::Provenance>,
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
     ) -> InterpResult<'tcx>;
@@ -228,7 +228,7 @@ pub trait Machine<'tcx>: Sized {
         ecx: &mut InterpCx<'tcx, Self>,
         instance: ty::Instance<'tcx>,
         args: &[OpTy<'tcx, Self::Provenance>],
-        destination: &MPlaceTy<'tcx, Self::Provenance>,
+        destination: &PlaceTy<'tcx, Self::Provenance>,
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
     ) -> InterpResult<'tcx, Option<ty::Instance<'tcx>>>;
@@ -437,7 +437,11 @@ pub trait Machine<'tcx>: Sized {
     ///
     /// Used to prevent statics from self-initializing by reading from their own memory
     /// as it is being initialized.
-    fn before_alloc_read(_ecx: &InterpCx<'tcx, Self>, _alloc_id: AllocId) -> InterpResult<'tcx> {
+    fn before_alloc_access(
+        _tcx: TyCtxtAt<'tcx>,
+        _machine: &Self,
+        _alloc_id: AllocId,
+    ) -> InterpResult<'tcx> {
         interp_ok(())
     }
 
@@ -530,11 +534,9 @@ pub trait Machine<'tcx>: Sized {
         interp_ok(())
     }
 
-    /// Called just before the return value is copied to the caller-provided return place.
-    fn before_stack_pop(
-        _ecx: &InterpCx<'tcx, Self>,
-        _frame: &Frame<'tcx, Self::Provenance, Self::FrameExtra>,
-    ) -> InterpResult<'tcx> {
+    /// Called just before the frame is removed from the stack (followed by return value copy and
+    /// local cleanup).
+    fn before_stack_pop(_ecx: &mut InterpCx<'tcx, Self>) -> InterpResult<'tcx> {
         interp_ok(())
     }
 
@@ -622,6 +624,21 @@ pub trait Machine<'tcx>: Sized {
         // Default to no caching.
         Cow::Owned(compute_range())
     }
+
+    /// Compute the value passed to the constructors of the `AllocBytes` type for
+    /// abstract machine allocations.
+    fn get_default_alloc_params(&self) -> <Self::Bytes as AllocBytes>::AllocParams;
+
+    /// Allows enabling/disabling tracing calls from within `rustc_const_eval` at compile time, by
+    /// delegating the entering of [tracing::Span]s to implementors of the [Machine] trait. The
+    /// default implementation corresponds to tracing being disabled, meaning the tracing calls will
+    /// supposedly be optimized out completely. To enable tracing, override this trait method and
+    /// return `span.entered()`. Also see [crate::enter_trace_span].
+    #[must_use]
+    #[inline(always)]
+    fn enter_trace_span(_span: impl FnOnce() -> tracing::Span) -> impl EnteredTraceSpan {
+        ()
+    }
 }
 
 /// A lot of the flexibility above is just needed for `Miri`, but all "compile-time" machines
@@ -669,7 +686,7 @@ pub macro compile_time_machine(<$tcx: lifetime>) {
         fn_val: !,
         _abi: &FnAbi<$tcx, Ty<$tcx>>,
         _args: &[FnArg<$tcx>],
-        _destination: &MPlaceTy<$tcx, Self::Provenance>,
+        _destination: &PlaceTy<$tcx, Self::Provenance>,
         _target: Option<mir::BasicBlock>,
         _unwind: mir::UnwindAction,
     ) -> InterpResult<$tcx> {
@@ -735,7 +752,7 @@ pub macro compile_time_machine(<$tcx: lifetime>) {
         // Allow these casts, but make the pointer not dereferenceable.
         // (I.e., they behave like transmutation.)
         // This is correct because no pointers can ever be exposed in compile-time evaluation.
-        interp_ok(Pointer::from_addr_invalid(addr))
+        interp_ok(Pointer::without_provenance(addr))
     }
 
     #[inline(always)]
@@ -744,8 +761,7 @@ pub macro compile_time_machine(<$tcx: lifetime>) {
         ptr: Pointer<CtfeProvenance>,
         _size: i64,
     ) -> Option<(AllocId, Size, Self::ProvenanceExtra)> {
-        // We know `offset` is relative to the allocation, so we can use `into_parts`.
-        let (prov, offset) = ptr.into_parts();
+        let (prov, offset) = ptr.prov_and_relative_offset();
         Some((prov.alloc_id(), offset, prov.immutable()))
     }
 

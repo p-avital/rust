@@ -2,7 +2,7 @@ use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_and_help;
 use clippy_utils::msrvs::{self, Msrv};
 use rustc_ast::ast::{FloatTy, LitFloatType, LitKind};
-use rustc_attr_parsing::RustcVersion;
+use rustc_attr_data_structures::RustcVersion;
 use rustc_hir::{HirId, Lit};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::impl_lint_pass;
@@ -74,7 +74,7 @@ impl ApproxConstant {
 }
 
 impl LateLintPass<'_> for ApproxConstant {
-    fn check_lit(&mut self, cx: &LateContext<'_>, _hir_id: HirId, lit: &Lit, _negated: bool) {
+    fn check_lit(&mut self, cx: &LateContext<'_>, _hir_id: HirId, lit: Lit, _negated: bool) {
         match lit.node {
             LitKind::Float(s, LitFloatType::Suffixed(fty)) => match fty {
                 FloatTy::F16 => self.check_known_consts(cx, lit.span, s, "f16"),

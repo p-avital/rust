@@ -704,7 +704,7 @@ pub(crate) unsafe fn llvm_optimize(
 }
 
 // Unsafe due to LLVM calls.
-pub(crate) unsafe fn optimize(
+pub(crate) fn optimize(
     cgcx: &CodegenContext<LlvmCodegenBackend>,
     dcx: DiagCtxtHandle<'_>,
     module: &mut ModuleCodegen<ModuleLlvm>,
@@ -815,7 +815,7 @@ pub(crate) fn link(
     Ok(modules.remove(0))
 }
 
-pub(crate) unsafe fn codegen(
+pub(crate) fn codegen(
     cgcx: &CodegenContext<LlvmCodegenBackend>,
     dcx: DiagCtxtHandle<'_>,
     module: ModuleCodegen<ModuleLlvm>,
@@ -1182,7 +1182,7 @@ fn create_msvc_imps(
         .filter_map(|val| {
             // Exclude some symbols that we know are not Rust symbols.
             let name = llvm::get_value_name(val);
-            if ignored(name) { None } else { Some((val, name)) }
+            if ignored(&name) { None } else { Some((val, name)) }
         })
         .map(move |(val, name)| {
             let mut imp_name = prefix.as_bytes().to_vec();

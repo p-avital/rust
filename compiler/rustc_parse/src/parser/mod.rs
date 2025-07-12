@@ -1,3 +1,4 @@
+pub mod asm;
 pub mod attr;
 mod attr_wrapper;
 mod diagnostics;
@@ -684,7 +685,7 @@ impl<'a> Parser<'a> {
 
     /// Is the given keyword `kw` followed by a non-reserved identifier?
     fn is_kw_followed_by_ident(&self, kw: Symbol) -> bool {
-        self.token.is_keyword(kw) && self.look_ahead(1, |t| t.is_ident() && !t.is_reserved_ident())
+        self.token.is_keyword(kw) && self.look_ahead(1, |t| t.is_non_reserved_ident())
     }
 
     #[inline]
@@ -1292,8 +1293,10 @@ impl<'a> Parser<'a> {
         let kind = if pat {
             let guar = self
                 .dcx()
-                .struct_span_err(blk_span, "`inline_const_pat` has been removed")
-                .with_help("use a named `const`-item or an `if`-guard instead")
+                .struct_span_err(blk_span, "const blocks cannot be used as patterns")
+                .with_help(
+                    "use a named `const`-item or an `if`-guard (`x if x == const { ... }`) instead",
+                )
                 .emit();
             ExprKind::Err(guar)
         } else {

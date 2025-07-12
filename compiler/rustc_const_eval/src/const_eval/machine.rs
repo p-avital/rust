@@ -10,7 +10,7 @@ use rustc_hir::{self as hir, CRATE_HIR_ID, LangItem};
 use rustc_middle::mir::AssertMessage;
 use rustc_middle::mir::interpret::ReportedErrorInfo;
 use rustc_middle::query::TyCtxtAt;
-use rustc_middle::ty::layout::{HasTypingEnv, TyAndLayout};
+use rustc_middle::ty::layout::{HasTypingEnv, TyAndLayout, ValidityRequirement};
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_middle::{bug, mir};
 use rustc_span::{Span, Symbol, sym};
@@ -22,9 +22,9 @@ use crate::errors::{LongRunning, LongRunningWarn};
 use crate::fluent_generated as fluent;
 use crate::interpret::{
     self, AllocId, AllocInit, AllocRange, ConstAllocation, CtfeProvenance, FnArg, Frame,
-    GlobalAlloc, ImmTy, InterpCx, InterpResult, MPlaceTy, OpTy, Pointer, RangeSet, Scalar,
-    compile_time_machine, interp_ok, throw_exhaust, throw_inval, throw_ub, throw_ub_custom,
-    throw_unsup, throw_unsup_format,
+    GlobalAlloc, ImmTy, InterpCx, InterpResult, OpTy, PlaceTy, Pointer, RangeSet, Scalar,
+    compile_time_machine, err_inval, interp_ok, throw_exhaust, throw_inval, throw_ub,
+    throw_ub_custom, throw_unsup, throw_unsup_format,
 };
 
 /// When hitting this many interpreted terminators we emit a deny by default lint
@@ -62,7 +62,7 @@ pub struct CompileTimeMachine<'tcx> {
 
     /// If `Some`, we are evaluating the initializer of the static with the given `LocalDefId`,
     /// storing the result in the given `AllocId`.
-    /// Used to prevent reads from a static's base allocation, as that may allow for self-initialization loops.
+    /// Used to prevent accesses to a static's base allocation, as that may allow for self-initialization loops.
     pub(crate) static_root_ids: Option<(AllocId, LocalDefId)>,
 
     /// A cache of "data range" computations for unions (i.e., the offsets of non-padding bytes).
@@ -226,7 +226,7 @@ impl<'tcx> CompileTimeInterpCx<'tcx> {
         &mut self,
         instance: ty::Instance<'tcx>,
         args: &[FnArg<'tcx>],
-        _dest: &MPlaceTy<'tcx>,
+        _dest: &PlaceTy<'tcx>,
         _ret: Option<mir::BasicBlock>,
     ) -> InterpResult<'tcx, Option<ty::Instance<'tcx>>> {
         let def_id = instance.def_id();
@@ -249,7 +249,7 @@ impl<'tcx> CompileTimeInterpCx<'tcx> {
             return Err(ConstEvalErrKind::Panic { msg, file, line, col }).into();
         } else if self.tcx.is_lang_item(def_id, LangItem::PanicFmt) {
             // For panic_fmt, call const_panic_fmt instead.
-            let const_def_id = self.tcx.require_lang_item(LangItem::ConstPanicFmt, None);
+            let const_def_id = self.tcx.require_lang_item(LangItem::ConstPanicFmt, self.tcx.span);
             let new_instance = ty::Instance::expect_resolve(
                 *self.tcx,
                 self.typing_env(),
@@ -331,10 +331,10 @@ impl<'tcx> interpret::Machine<'tcx> for CompileTimeMachine<'tcx> {
     fn load_mir(
         ecx: &InterpCx<'tcx, Self>,
         instance: ty::InstanceKind<'tcx>,
-    ) -> InterpResult<'tcx, &'tcx mir::Body<'tcx>> {
+    ) -> &'tcx mir::Body<'tcx> {
         match instance {
-            ty::InstanceKind::Item(def) => interp_ok(ecx.tcx.mir_for_ctfe(def)),
-            _ => interp_ok(ecx.tcx.instance_mir(instance)),
+            ty::InstanceKind::Item(def) => ecx.tcx.mir_for_ctfe(def),
+            _ => ecx.tcx.instance_mir(instance),
         }
     }
 
@@ -343,7 +343,7 @@ impl<'tcx> interpret::Machine<'tcx> for CompileTimeMachine<'tcx> {
         orig_instance: ty::Instance<'tcx>,
         _abi: &FnAbi<'tcx, Ty<'tcx>>,
         args: &[FnArg<'tcx>],
-        dest: &MPlaceTy<'tcx>,
+        dest: &PlaceTy<'tcx>,
         ret: Option<mir::BasicBlock>,
         _unwind: mir::UnwindAction, // unwinding is not supported in consts
     ) -> InterpResult<'tcx, Option<(&'tcx mir::Body<'tcx>, ty::Instance<'tcx>)>> {
@@ -385,7 +385,7 @@ impl<'tcx> interpret::Machine<'tcx> for CompileTimeMachine<'tcx> {
         ecx: &mut InterpCx<'tcx, Self>,
         instance: ty::Instance<'tcx>,
         args: &[OpTy<'tcx>],
-        dest: &MPlaceTy<'tcx, Self::Provenance>,
+        dest: &PlaceTy<'tcx, Self::Provenance>,
         target: Option<mir::BasicBlock>,
         _unwind: mir::UnwindAction,
     ) -> InterpResult<'tcx, Option<ty::Instance<'tcx>>> {
@@ -462,6 +462,44 @@ impl<'tcx> interpret::Machine<'tcx> for CompileTimeMachine<'tcx> {
             // (We know the value here in the machine of course, but this is the runtime of that code,
             // not the optimization stage.)
             sym::is_val_statically_known => ecx.write_scalar(Scalar::from_bool(false), dest)?,
+
+            // We handle these here since Miri does not want to have them.
+            sym::assert_inhabited
+            | sym::assert_zero_valid
+            | sym::assert_mem_uninitialized_valid => {
+                let ty = instance.args.type_at(0);
+                let requirement = ValidityRequirement::from_intrinsic(intrinsic_name).unwrap();
+
+                let should_panic = !ecx
+                    .tcx
+                    .check_validity_requirement((requirement, ecx.typing_env().as_query_input(ty)))
+                    .map_err(|_| err_inval!(TooGeneric))?;
+
+                if should_panic {
+                    let layout = ecx.layout_of(ty)?;
+
+                    let msg = match requirement {
+                        // For *all* intrinsics we first check `is_uninhabited` to give a more specific
+                        // error message.
+                        _ if layout.is_uninhabited() => format!(
+                            "aborted execution: attempted to instantiate uninhabited type `{ty}`"
+                        ),
+                        ValidityRequirement::Inhabited => bug!("handled earlier"),
+                        ValidityRequirement::Zero => format!(
+                            "aborted execution: attempted to zero-initialize type `{ty}`, which is invalid"
+                        ),
+                        ValidityRequirement::UninitMitigated0x01Fill => format!(
+                            "aborted execution: attempted to leave type `{ty}` uninitialized, which is invalid"
+                        ),
+                        ValidityRequirement::Uninit => bug!("assert_uninit_valid doesn't exist"),
+                    };
+
+                    Self::panic_nounwind(ecx, &msg)?;
+                    // Skip the `return_to_block` at the end (we panicked, we do not return).
+                    return interp_ok(None);
+                }
+            }
+
             _ => {
                 // We haven't handled the intrinsic, let's see if we can use a fallback body.
                 if ecx.tcx.intrinsic(instance.def_id()).unwrap().must_be_overridden {
@@ -508,6 +546,7 @@ impl<'tcx> interpret::Machine<'tcx> for CompileTimeMachine<'tcx> {
                 found: eval_to_int(found)?,
             },
             NullPointerDereference => NullPointerDereference,
+            InvalidEnumConstruction(source) => InvalidEnumConstruction(eval_to_int(source)?),
         };
         Err(ConstEvalErrKind::AssertFailure(err)).into()
     }
@@ -705,19 +744,27 @@ impl<'tcx> interpret::Machine<'tcx> for CompileTimeMachine<'tcx> {
         interp_ok(())
     }
 
-    fn before_alloc_read(ecx: &InterpCx<'tcx, Self>, alloc_id: AllocId) -> InterpResult<'tcx> {
+    fn before_alloc_access(
+        tcx: TyCtxtAt<'tcx>,
+        machine: &Self,
+        alloc_id: AllocId,
+    ) -> InterpResult<'tcx> {
+        if machine.stack.is_empty() {
+            // Get out of the way for the final copy.
+            return interp_ok(());
+        }
         // Check if this is the currently evaluated static.
-        if Some(alloc_id) == ecx.machine.static_root_ids.map(|(id, _)| id) {
+        if Some(alloc_id) == machine.static_root_ids.map(|(id, _)| id) {
             return Err(ConstEvalErrKind::RecursiveStatic).into();
         }
         // If this is another static, make sure we fire off the query to detect cycles.
         // But only do that when checks for static recursion are enabled.
-        if ecx.machine.static_root_ids.is_some() {
-            if let Some(GlobalAlloc::Static(def_id)) = ecx.tcx.try_get_global_alloc(alloc_id) {
-                if ecx.tcx.is_foreign_item(def_id) {
+        if machine.static_root_ids.is_some() {
+            if let Some(GlobalAlloc::Static(def_id)) = tcx.try_get_global_alloc(alloc_id) {
+                if tcx.is_foreign_item(def_id) {
                     throw_unsup!(ExternStatic(def_id));
                 }
-                ecx.ctfe_query(|tcx| tcx.eval_static_initializer(def_id))?;
+                tcx.eval_static_initializer(def_id)?;
             }
         }
         interp_ok(())
@@ -734,6 +781,9 @@ impl<'tcx> interpret::Machine<'tcx> for CompileTimeMachine<'tcx> {
             // Don't bother caching, we're only doing one validation at the end anyway.
             Cow::Owned(compute_range())
         }
+    }
+
+    fn get_default_alloc_params(&self) -> <Self::Bytes as mir::interpret::AllocBytes>::AllocParams {
     }
 }
 

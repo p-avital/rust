@@ -587,7 +587,7 @@ fn thin_lto(
 }
 
 fn enable_autodiff_settings(ad: &[config::AutoDiff]) {
-    for &val in ad {
+    for val in ad {
         // We intentionally don't use a wildcard, to not forget handling anything new.
         match val {
             config::AutoDiff::PrintPerf => {
@@ -598,6 +598,10 @@ fn enable_autodiff_settings(ad: &[config::AutoDiff]) {
             }
             config::AutoDiff::PrintTA => {
                 llvm::set_print_type(true);
+            }
+            config::AutoDiff::PrintTAFn(fun) => {
+                llvm::set_print_type(true); // Enable general type printing
+                llvm::set_print_type_fun(&fun); // Set specific function to analyze
             }
             config::AutoDiff::Inline => {
                 llvm::set_inline(true);
@@ -676,7 +680,7 @@ pub(crate) fn run_pass_manager(
             if attributes::has_string_attr(function, enzyme_marker) {
                 // Sanity check: Ensure 'noinline' is present before replacing it.
                 assert!(
-                    !attributes::has_attr(function, Function, llvm::AttributeKind::NoInline),
+                    attributes::has_attr(function, Function, llvm::AttributeKind::NoInline),
                     "Expected __enzyme function to have 'noinline' before adding 'alwaysinline'"
                 );
 
@@ -799,7 +803,7 @@ impl Drop for ThinBuffer {
     }
 }
 
-pub(crate) unsafe fn optimize_thin_module(
+pub(crate) fn optimize_thin_module(
     thin_module: ThinModule<LlvmCodegenBackend>,
     cgcx: &CodegenContext<LlvmCodegenBackend>,
 ) -> Result<ModuleCodegen<ModuleLlvm>, FatalError> {

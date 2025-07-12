@@ -1,4 +1,5 @@
 use std::borrow::Borrow;
+use std::hash::{Hash, Hasher};
 use std::{fmt, ptr};
 
 use libc::{c_char, c_uint};
@@ -25,6 +26,14 @@ impl PartialEq for Type {
     }
 }
 
+impl Eq for Type {}
+
+impl Hash for Type {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        ptr::hash(self, state);
+    }
+}
+
 impl fmt::Debug for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(
@@ -48,13 +57,6 @@ impl<'ll, CX: Borrow<SCx<'ll>>> GenericCx<'ll, CX> {
     }
     pub(crate) fn type_void(&self) -> &'ll Type {
         unsafe { llvm::LLVMVoidTypeInContext(self.llcx()) }
-    }
-    pub(crate) fn type_token(&self) -> &'ll Type {
-        unsafe { llvm::LLVMTokenTypeInContext(self.llcx()) }
-    }
-
-    pub(crate) fn type_metadata(&self) -> &'ll Type {
-        unsafe { llvm::LLVMMetadataTypeInContext(self.llcx()) }
     }
 
     ///x Creates an integer type with the given number of bits, e.g., i24
@@ -206,7 +208,7 @@ impl<'ll, CX: Borrow<SCx<'ll>>> BaseTypeCodegenMethods for GenericCx<'ll, CX> {
     }
 
     fn type_ptr(&self) -> &'ll Type {
-        self.type_ptr_ext(AddressSpace::DATA)
+        self.type_ptr_ext(AddressSpace::ZERO)
     }
 
     fn type_ptr_ext(&self, address_space: AddressSpace) -> &'ll Type {
@@ -256,7 +258,7 @@ impl Type {
     }
 
     pub(crate) fn ptr_llcx(llcx: &llvm::Context) -> &Type {
-        unsafe { llvm::LLVMPointerTypeInContext(llcx, AddressSpace::DATA.0) }
+        unsafe { llvm::LLVMPointerTypeInContext(llcx, AddressSpace::ZERO.0) }
     }
 }
 

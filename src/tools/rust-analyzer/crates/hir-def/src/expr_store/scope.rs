@@ -324,11 +324,13 @@ mod tests {
     use test_fixture::WithFixture;
     use test_utils::{assert_eq_text, extract_offset};
 
-    use crate::{FunctionId, ModuleDefId, db::DefDatabase, test_db::TestDB};
+    use crate::{
+        FunctionId, ModuleDefId, db::DefDatabase, nameres::crate_def_map, test_db::TestDB,
+    };
 
     fn find_function(db: &TestDB, file_id: FileId) -> FunctionId {
         let krate = db.test_crate();
-        let crate_def_map = db.crate_def_map(krate);
+        let crate_def_map = crate_def_map(db, krate);
 
         let module = crate_def_map.modules_for_file(db, file_id).next().unwrap();
         let (_, def) = crate_def_map[module].scope.entries().next().unwrap();
@@ -533,7 +535,7 @@ fn foo() {
 
         let resolved = scopes.resolve_name_in_scope(expr_scope, &name_ref.as_name()).unwrap();
         let pat_src = source_map
-            .pat_syntax(*source_map.binding_definitions[&resolved.binding()].first().unwrap())
+            .pat_syntax(*source_map.binding_definitions[resolved.binding()].first().unwrap())
             .unwrap();
 
         let local_name = pat_src.value.syntax_node_ptr().to_node(file.syntax());

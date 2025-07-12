@@ -12,7 +12,7 @@ use rustc_hir::{
     Pat, PatExpr, PatExprKind, PatField, PatKind, Path, PathSegment, PrimTy, QPath, Stmt, StmtKind, StructTailExpr,
     TraitBoundModifiers, Ty, TyKind, TyPat, TyPatKind,
 };
-use rustc_lexer::{TokenKind, tokenize};
+use rustc_lexer::{FrontmatterAllowed, TokenKind, tokenize};
 use rustc_lint::LateContext;
 use rustc_middle::ty::TypeckResults;
 use rustc_span::{BytePos, ExpnKind, MacroKind, Symbol, SyntaxContext, sym};
@@ -686,7 +686,7 @@ fn reduce_exprkind<'hir>(cx: &LateContext<'_>, kind: &'hir ExprKind<'hir>) -> &'
             // `{}` => `()`
             ([], None)
                 if block.span.check_source_text(cx, |src| {
-                    tokenize(src)
+                    tokenize(src, FrontmatterAllowed::No)
                         .map(|t| t.kind)
                         .filter(|t| {
                             !matches!(
@@ -1283,20 +1283,20 @@ impl<'a, 'tcx> SpanlessHash<'a, 'tcx> {
                 self.hash_ty(mut_ty.ty);
                 mut_ty.mutbl.hash(&mut self.s);
             },
-            TyKind::BareFn(bfn) => {
-                bfn.safety.hash(&mut self.s);
-                bfn.abi.hash(&mut self.s);
-                for arg in bfn.decl.inputs {
+            TyKind::FnPtr(fn_ptr) => {
+                fn_ptr.safety.hash(&mut self.s);
+                fn_ptr.abi.hash(&mut self.s);
+                for arg in fn_ptr.decl.inputs {
                     self.hash_ty(arg);
                 }
-                std::mem::discriminant(&bfn.decl.output).hash(&mut self.s);
-                match bfn.decl.output {
+                std::mem::discriminant(&fn_ptr.decl.output).hash(&mut self.s);
+                match fn_ptr.decl.output {
                     FnRetTy::DefaultReturn(_) => {},
                     FnRetTy::Return(ty) => {
                         self.hash_ty(ty);
                     },
                 }
-                bfn.decl.c_variadic.hash(&mut self.s);
+                fn_ptr.decl.c_variadic.hash(&mut self.s);
             },
             TyKind::Tup(ty_list) => {
                 for ty in *ty_list {

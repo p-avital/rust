@@ -60,7 +60,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 if access_place.as_local().is_some() {
                     reason = ", as it is not declared as mutable".to_string();
                 } else {
-                    let name = self.local_names[local].expect("immutable unnamed local");
+                    let name = self.local_name(local).expect("immutable unnamed local");
                     reason = format!(", as `{name}` is not declared as mutable");
                 }
             }
@@ -285,7 +285,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                     .body
                     .local_decls
                     .get(local)
-                    .is_some_and(|l| mut_borrow_of_mutable_ref(l, self.local_names[local])) =>
+                    .is_some_and(|l| mut_borrow_of_mutable_ref(l, self.local_name(local))) =>
             {
                 let decl = &self.body.local_decls[local];
                 err.span_label(span, format!("cannot {act}"));
@@ -481,7 +481,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 let (pointer_sigil, pointer_desc) =
                     if local_decl.ty.is_ref() { ("&", "reference") } else { ("*const", "pointer") };
 
-                match self.local_names[local] {
+                match self.local_name(local) {
                     Some(name) if !local_decl.from_compiler_desugaring() => {
                         err.span_label(
                             span,
@@ -840,14 +840,22 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             } else {
                 bug!("not an upvar")
             };
-            err.span_label(
-                *span,
-                format!(
-                    "calling `{}` requires mutable binding due to {}",
-                    self.describe_place(the_place_err).unwrap(),
-                    reason
-                ),
-            );
+            // sometimes we deliberately don't store the name of a place when coming from a macro in
+            // another crate. We generally want to limit those diagnostics a little, to hide
+            // implementation details (such as those from pin!() or format!()). In that case show a
+            // slightly different error message, or none at all if something else happened. In other
+            // cases the message is likely not useful.
+            if let Some(place_name) = self.describe_place(the_place_err) {
+                err.span_label(
+                    *span,
+                    format!("calling `{place_name}` requires mutable binding due to {reason}"),
+                );
+            } else if span.from_expansion() {
+                err.span_label(
+                    *span,
+                    format!("a call in this macro requires a mutable binding due to {reason}",),
+                );
+            }
         }
     }
 
@@ -1160,6 +1168,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                                     _,
                                     mir::Rvalue::Use(mir::Operand::Copy(place)),
                                 )),
+                            ..
                         }) = self.body[location.block].statements.get(location.statement_index)
                         {
                             self.body.local_decls[place.local].source_info.span

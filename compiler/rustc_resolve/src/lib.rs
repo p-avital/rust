@@ -10,7 +10,6 @@
 #![allow(internal_features)]
 #![allow(rustc::diagnostic_outside_of_impl)]
 #![allow(rustc::untranslatable_diagnostic)]
-#![cfg_attr(bootstrap, feature(let_chains))]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
 #![feature(assert_matches)]
@@ -47,7 +46,7 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_data_structures::intern::Interned;
 use rustc_data_structures::steal::Steal;
 use rustc_data_structures::sync::FreezeReadGuard;
-use rustc_data_structures::unord::UnordMap;
+use rustc_data_structures::unord::{UnordMap, UnordSet};
 use rustc_errors::{Applicability, Diag, ErrCode, ErrorGuaranteed};
 use rustc_expand::base::{DeriveResolution, SyntaxExtension, SyntaxExtensionKind};
 use rustc_feature::BUILTIN_ATTRIBUTES;
@@ -58,6 +57,7 @@ use rustc_hir::def::{
 use rustc_hir::def_id::{CRATE_DEF_ID, CrateNum, DefId, LOCAL_CRATE, LocalDefId, LocalDefIdMap};
 use rustc_hir::definitions::DisambiguatorState;
 use rustc_hir::{PrimTy, TraitCandidate};
+use rustc_index::bit_set::DenseBitSet;
 use rustc_metadata::creader::{CStore, CrateLoader};
 use rustc_middle::metadata::ModChild;
 use rustc_middle::middle::privacy::EffectiveVisibilities;
@@ -1015,13 +1015,13 @@ struct DeriveData {
 
 struct MacroData {
     ext: Arc<SyntaxExtension>,
-    rule_spans: Vec<(usize, Span)>,
+    nrules: usize,
     macro_rules: bool,
 }
 
 impl MacroData {
     fn new(ext: Arc<SyntaxExtension>) -> MacroData {
-        MacroData { ext, rule_spans: Vec::new(), macro_rules: false }
+        MacroData { ext, nrules: 0, macro_rules: false }
     }
 }
 
@@ -1032,7 +1032,7 @@ pub struct Resolver<'ra, 'tcx> {
     tcx: TyCtxt<'tcx>,
 
     /// Item with a given `LocalDefId` was defined during macro expansion with ID `ExpnId`.
-    expn_that_defined: FxHashMap<LocalDefId, ExpnId>,
+    expn_that_defined: UnordMap<LocalDefId, ExpnId>,
 
     graph_root: Module<'ra>,
 
@@ -1128,19 +1128,21 @@ pub struct Resolver<'ra, 'tcx> {
     builtin_macros: FxHashMap<Symbol, SyntaxExtensionKind>,
     registered_tools: &'tcx RegisteredTools,
     macro_use_prelude: FxIndexMap<Symbol, NameBinding<'ra>>,
-    macro_map: FxHashMap<DefId, MacroData>,
+    local_macro_map: FxHashMap<LocalDefId, &'ra MacroData>,
+    /// Lazily populated cache of macros loaded from external crates.
+    extern_macro_map: RefCell<FxHashMap<DefId, &'ra MacroData>>,
     dummy_ext_bang: Arc<SyntaxExtension>,
     dummy_ext_derive: Arc<SyntaxExtension>,
-    non_macro_attr: MacroData,
+    non_macro_attr: &'ra MacroData,
     local_macro_def_scopes: FxHashMap<LocalDefId, Module<'ra>>,
     ast_transform_scopes: FxHashMap<LocalExpnId, Module<'ra>>,
     unused_macros: FxIndexMap<LocalDefId, (NodeId, Ident)>,
     /// A map from the macro to all its potentially unused arms.
-    unused_macro_rules: FxIndexMap<NodeId, UnordMap<usize, (Ident, Span)>>,
+    unused_macro_rules: FxIndexMap<NodeId, DenseBitSet<usize>>,
     proc_macro_stubs: FxHashSet<LocalDefId>,
     /// Traces collected during macro resolution and validated when it's complete.
     single_segment_macro_resolutions:
-        Vec<(Ident, MacroKind, ParentScope<'ra>, Option<NameBinding<'ra>>)>,
+        Vec<(Ident, MacroKind, ParentScope<'ra>, Option<NameBinding<'ra>>, Option<Span>)>,
     multi_segment_macro_resolutions:
         Vec<(Vec<Segment>, Span, MacroKind, ParentScope<'ra>, Option<Res>, Namespace)>,
     builtin_attrs: Vec<(Ident, ParentScope<'ra>)>,
@@ -1209,7 +1211,7 @@ pub struct Resolver<'ra, 'tcx> {
     effective_visibilities: EffectiveVisibilities,
     doc_link_resolutions: FxIndexMap<LocalDefId, DocLinkResMap>,
     doc_link_traits_in_scope: FxIndexMap<LocalDefId, Vec<DefId>>,
-    all_macro_rules: FxHashSet<Symbol>,
+    all_macro_rules: UnordSet<Symbol>,
 
     /// Invocation ids of all glob delegations.
     glob_delegation_invoc_ids: FxHashSet<LocalExpnId>,
@@ -1225,6 +1227,11 @@ pub struct Resolver<'ra, 'tcx> {
     current_crate_outer_attr_insert_span: Span,
 
     mods_with_parse_errors: FxHashSet<DefId>,
+
+    // Stores pre-expansion and pre-placeholder-fragment-insertion names for `impl Trait` types
+    // that were encountered during resolution. These names are used to generate item names
+    // for APITs, so we don't want to leak details of resolution into these names.
+    impl_trait_names: FxHashMap<NodeId, Symbol>,
 }
 
 /// This provides memory for the rest of the crate. The `'ra` lifetime that is
@@ -1236,6 +1243,7 @@ pub struct ResolverArenas<'ra> {
     imports: TypedArena<ImportData<'ra>>,
     name_resolutions: TypedArena<RefCell<NameResolution<'ra>>>,
     ast_paths: TypedArena<ast::Path>,
+    macros: TypedArena<MacroData>,
     dropless: DroplessArena,
 }
 
@@ -1282,7 +1290,7 @@ impl<'ra> ResolverArenas<'ra> {
         self.name_resolutions.alloc(Default::default())
     }
     fn alloc_macro_rules_scope(&'ra self, scope: MacroRulesScope<'ra>) -> MacroRulesScopeRef<'ra> {
-        Interned::new_unchecked(self.dropless.alloc(Cell::new(scope)))
+        self.dropless.alloc(Cell::new(scope))
     }
     fn alloc_macro_rules_binding(
         &'ra self,
@@ -1292,6 +1300,9 @@ impl<'ra> ResolverArenas<'ra> {
     }
     fn alloc_ast_paths(&'ra self, paths: &[ast::Path]) -> &'ra [ast::Path] {
         self.ast_paths.alloc_from_iter(paths.iter().cloned())
+    }
+    fn alloc_macro(&'ra self, macro_data: MacroData) -> &'ra MacroData {
+        self.macros.alloc(macro_data)
     }
     fn alloc_pattern_spans(&'ra self, spans: impl Iterator<Item = Span>) -> &'ra [Span] {
         self.dropless.alloc_from_iter(spans)
@@ -1535,10 +1546,12 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             builtin_macros: Default::default(),
             registered_tools,
             macro_use_prelude: Default::default(),
-            macro_map: FxHashMap::default(),
+            local_macro_map: Default::default(),
+            extern_macro_map: Default::default(),
             dummy_ext_bang: Arc::new(SyntaxExtension::dummy_bang(edition)),
             dummy_ext_derive: Arc::new(SyntaxExtension::dummy_derive(edition)),
-            non_macro_attr: MacroData::new(Arc::new(SyntaxExtension::non_macro_attr(edition))),
+            non_macro_attr: arenas
+                .alloc_macro(MacroData::new(Arc::new(SyntaxExtension::non_macro_attr(edition)))),
             invocation_parent_scopes: Default::default(),
             output_macro_rules_scopes: Default::default(),
             macro_rules_scopes: Default::default(),
@@ -1580,6 +1593,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             impl_binding_keys: Default::default(),
             current_crate_outer_attr_insert_span,
             mods_with_parse_errors: Default::default(),
+            impl_trait_names: Default::default(),
         };
 
         let root_parent_scope = ParentScope::module(graph_root, &resolver);
@@ -1608,6 +1622,12 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             module_map,
             module_self_bindings,
         )
+    }
+
+    fn new_local_macro(&mut self, def_id: LocalDefId, macro_data: MacroData) -> &'ra MacroData {
+        let mac = self.arenas.alloc_macro(macro_data);
+        self.local_macro_map.insert(def_id, mac);
+        mac
     }
 
     fn next_node_id(&mut self) -> NodeId {
@@ -1648,16 +1668,15 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         let confused_type_with_std_module = self.confused_type_with_std_module;
         let effective_visibilities = self.effective_visibilities;
 
-        let stripped_cfg_items = Steal::new(
-            self.stripped_cfg_items
-                .into_iter()
-                .filter_map(|item| {
-                    let parent_module =
-                        self.node_id_to_def_id.get(&item.parent_module)?.key().to_def_id();
-                    Some(StrippedCfgItem { parent_module, ident: item.ident, cfg: item.cfg })
-                })
-                .collect(),
-        );
+        let stripped_cfg_items = self
+            .stripped_cfg_items
+            .into_iter()
+            .filter_map(|item| {
+                let parent_module =
+                    self.node_id_to_def_id.get(&item.parent_module)?.key().to_def_id();
+                Some(StrippedCfgItem { parent_module, ident: item.ident, cfg: item.cfg })
+            })
+            .collect();
 
         let global_ctxt = ResolverGlobalCtxt {
             expn_that_defined,
@@ -1729,7 +1748,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         f(self, MacroNS);
     }
 
-    fn is_builtin_macro(&mut self, res: Res) -> bool {
+    fn is_builtin_macro(&self, res: Res) -> bool {
         self.get_macro(res).is_some_and(|macro_data| macro_data.ext.builtin_name.is_some())
     }
 
@@ -1935,12 +1954,26 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         }
         if let NameBindingKind::Import { import, binding } = used_binding.kind {
             if let ImportKind::MacroUse { warn_private: true } = import.kind {
-                self.lint_buffer().buffer_lint(
-                    PRIVATE_MACRO_USE,
-                    import.root_id,
-                    ident.span,
-                    BuiltinLintDiag::MacroIsPrivate(ident),
-                );
+                // Do not report the lint if the macro name resolves in stdlib prelude
+                // even without the problematic `macro_use` import.
+                let found_in_stdlib_prelude = self.prelude.is_some_and(|prelude| {
+                    self.maybe_resolve_ident_in_module(
+                        ModuleOrUniformRoot::Module(prelude),
+                        ident,
+                        MacroNS,
+                        &ParentScope::module(self.empty_module, self),
+                        None,
+                    )
+                    .is_ok()
+                });
+                if !found_in_stdlib_prelude {
+                    self.lint_buffer().buffer_lint(
+                        PRIVATE_MACRO_USE,
+                        import.root_id,
+                        ident.span,
+                        BuiltinLintDiag::MacroIsPrivate(ident),
+                    );
+                }
             }
             // Avoid marking `extern crate` items that refer to a name from extern prelude,
             // but not introduce it, as used if they are accessed from lexical scope.

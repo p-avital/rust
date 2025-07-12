@@ -1,8 +1,6 @@
 use std::ops::Range;
 
-use rustc_abi::{
-    Align, AlignFromBytesError, HasDataLayout, Primitive, Scalar, Size, WrappingRange,
-};
+use rustc_abi::{Align, HasDataLayout, Primitive, Scalar, Size, WrappingRange};
 use rustc_codegen_ssa::common;
 use rustc_codegen_ssa::traits::*;
 use rustc_hir::LangItem;
@@ -20,9 +18,7 @@ use rustc_middle::{bug, span_bug};
 use tracing::{debug, instrument, trace};
 
 use crate::common::{AsCCharPtr, CodegenCx};
-use crate::errors::{
-    InvalidMinimumAlignmentNotPowerOfTwo, InvalidMinimumAlignmentTooLarge, SymbolAlreadyDefined,
-};
+use crate::errors::SymbolAlreadyDefined;
 use crate::llvm::{self, True};
 use crate::type_::Type;
 use crate::type_of::LayoutLlvmExt;
@@ -31,10 +27,9 @@ use crate::{base, debuginfo};
 
 pub(crate) fn const_alloc_to_llvm<'ll>(
     cx: &CodegenCx<'ll, '_>,
-    alloc: ConstAllocation<'_>,
+    alloc: &Allocation,
     is_static: bool,
 ) -> &'ll Value {
-    let alloc = alloc.inner();
     // We expect that callers of const_alloc_to_llvm will instead directly codegen a pointer or
     // integer for any &ZST where the ZST is a constant (i.e. not a static). We should never be
     // producing empty LLVM allocations as they're just adding noise to binaries and forcing less
@@ -47,7 +42,8 @@ pub(crate) fn const_alloc_to_llvm<'ll>(
     }
     let mut llvals = Vec::with_capacity(alloc.provenance().ptrs().len() + 1);
     let dl = cx.data_layout();
-    let pointer_size = dl.pointer_size.bytes() as usize;
+    let pointer_size = dl.pointer_size();
+    let pointer_size_bytes = pointer_size.bytes() as usize;
 
     // Note: this function may call `inspect_with_uninit_and_ptr_outside_interpreter`, so `range`
     // must be within the bounds of `alloc` and not contain or overlap a pointer provenance.
@@ -104,7 +100,9 @@ pub(crate) fn const_alloc_to_llvm<'ll>(
             // This `inspect` is okay since it is within the bounds of the allocation, it doesn't
             // affect interpreter execution (we inspect the result after interpreter execution),
             // and we properly interpret the provenance as a relocation pointer offset.
-            alloc.inspect_with_uninit_and_ptr_outside_interpreter(offset..(offset + pointer_size)),
+            alloc.inspect_with_uninit_and_ptr_outside_interpreter(
+                offset..(offset + pointer_size_bytes),
+            ),
         )
         .expect("const_alloc_to_llvm: could not read relocation pointer")
             as u64;
@@ -115,11 +113,11 @@ pub(crate) fn const_alloc_to_llvm<'ll>(
             InterpScalar::from_pointer(Pointer::new(prov, Size::from_bytes(ptr_offset)), &cx.tcx),
             Scalar::Initialized {
                 value: Primitive::Pointer(address_space),
-                valid_range: WrappingRange::full(dl.pointer_size),
+                valid_range: WrappingRange::full(pointer_size),
             },
             cx.type_ptr_ext(address_space),
         ));
-        next_offset = offset + pointer_size;
+        next_offset = offset + pointer_size_bytes;
     }
     if alloc.len() >= next_offset {
         let range = next_offset..alloc.len();
@@ -142,29 +140,17 @@ fn codegen_static_initializer<'ll, 'tcx>(
     def_id: DefId,
 ) -> Result<(&'ll Value, ConstAllocation<'tcx>), ErrorHandled> {
     let alloc = cx.tcx.eval_static_initializer(def_id)?;
-    Ok((const_alloc_to_llvm(cx, alloc, /*static*/ true), alloc))
+    Ok((const_alloc_to_llvm(cx, alloc.inner(), /*static*/ true), alloc))
 }
 
 fn set_global_alignment<'ll>(cx: &CodegenCx<'ll, '_>, gv: &'ll Value, mut align: Align) {
     // The target may require greater alignment for globals than the type does.
     // Note: GCC and Clang also allow `__attribute__((aligned))` on variables,
     // which can force it to be smaller. Rust doesn't support this yet.
-    if let Some(min) = cx.sess().target.min_global_align {
-        match Align::from_bits(min) {
-            Ok(min) => align = align.max(min),
-            Err(err) => match err {
-                AlignFromBytesError::NotPowerOfTwo(align) => {
-                    cx.sess().dcx().emit_err(InvalidMinimumAlignmentNotPowerOfTwo { align });
-                }
-                AlignFromBytesError::TooLarge(align) => {
-                    cx.sess().dcx().emit_err(InvalidMinimumAlignmentTooLarge { align });
-                }
-            },
-        }
+    if let Some(min_global) = cx.sess().target.min_global_align {
+        align = Ord::max(align, min_global);
     }
-    unsafe {
-        llvm::LLVMSetAlignment(gv, align.bytes() as u32);
-    }
+    llvm::set_alignment(gv, align);
 }
 
 fn check_and_apply_linkage<'ll, 'tcx>(
@@ -364,12 +350,7 @@ impl<'ll> CodegenCx<'ll, '_> {
 
         if !def_id.is_local() {
             let needs_dll_storage_attr = self.use_dll_storage_attrs
-                // If the symbol is a foreign item, then don't automatically apply DLLImport, as
-                // we'll rely on the #[link] attribute instead. BUT, if this is an internal symbol
-                // then it may be generated by the compiler in some crate, so we do need to apply
-                // DLLImport when linking with the MSVC linker.
-                && (!self.tcx.is_foreign_item(def_id)
-                    || (self.sess().target.is_like_msvc && fn_attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL)))
+                && !self.tcx.is_foreign_item(def_id)
                 // Local definitions can never be imported, so we must not apply
                 // the DLLImport annotation.
                 && !dso_local
@@ -416,7 +397,7 @@ impl<'ll> CodegenCx<'ll, '_> {
         g
     }
 
-    fn codegen_static_item(&self, def_id: DefId) {
+    fn codegen_static_item(&mut self, def_id: DefId) {
         unsafe {
             assert!(
                 llvm::LLVMGetInitializer(
@@ -448,7 +429,7 @@ impl<'ll> CodegenCx<'ll, '_> {
                 // specific rules on what can be cast. So instead of adding a new way to
                 // generate static initializers that match the static's type, we picked
                 // the easier option and retroactively change the type of the static item itself.
-                let name = llvm::get_value_name(g).to_vec();
+                let name = llvm::get_value_name(g);
                 llvm::set_value_name(g, b"");
 
                 let linkage = llvm::get_linkage(g);
@@ -532,7 +513,7 @@ impl<'ll> CodegenCx<'ll, '_> {
 
             base::set_variable_sanitizer_attrs(g, attrs);
 
-            if attrs.flags.contains(CodegenFnAttrFlags::USED) {
+            if attrs.flags.contains(CodegenFnAttrFlags::USED_COMPILER) {
                 // `USED` and `USED_LINKER` can't be used together.
                 assert!(!attrs.flags.contains(CodegenFnAttrFlags::USED_LINKER));
 
@@ -546,21 +527,32 @@ impl<'ll> CodegenCx<'ll, '_> {
                 // in the handling of `.init_array` (the static constructor list) in versions of
                 // the gold linker (prior to the one released with binutils 2.36).
                 //
-                // That said, we only ever emit these when compiling for ELF targets, unless
-                // `#[used(compiler)]` is explicitly requested. This is to avoid similar breakage
-                // on other targets, in particular MachO targets have *their* static constructor
-                // lists broken if `llvm.compiler.used` is emitted rather than `llvm.used`. However,
-                // that check happens when assigning the `CodegenFnAttrFlags` in
-                // `rustc_hir_analysis`, so we don't need to take care of it here.
+                // That said, we only ever emit these when `#[used(compiler)]` is explicitly
+                // requested. This is to avoid similar breakage on other targets, in particular
+                // MachO targets have *their* static constructor lists broken if `llvm.compiler.used`
+                // is emitted rather than `llvm.used`. However, that check happens when assigning
+                // the `CodegenFnAttrFlags` in the `codegen_fn_attrs` query, so we don't need to
+                // take care of it here.
                 self.add_compiler_used_global(g);
             }
             if attrs.flags.contains(CodegenFnAttrFlags::USED_LINKER) {
                 // `USED` and `USED_LINKER` can't be used together.
-                assert!(!attrs.flags.contains(CodegenFnAttrFlags::USED));
+                assert!(!attrs.flags.contains(CodegenFnAttrFlags::USED_COMPILER));
 
                 self.add_used_global(g);
             }
         }
+    }
+
+    /// Add a global value to a list to be stored in the `llvm.used` variable, an array of ptr.
+    pub(crate) fn add_used_global(&mut self, global: &'ll Value) {
+        self.used_statics.push(global);
+    }
+
+    /// Add a global value to a list to be stored in the `llvm.compiler.used` variable,
+    /// an array of ptr.
+    pub(crate) fn add_compiler_used_global(&mut self, global: &'ll Value) {
+        self.compiler_used_statics.push(global);
     }
 }
 
@@ -576,18 +568,7 @@ impl<'ll> StaticCodegenMethods for CodegenCx<'ll, '_> {
         self.const_pointercast(gv, self.type_ptr())
     }
 
-    fn codegen_static(&self, def_id: DefId) {
+    fn codegen_static(&mut self, def_id: DefId) {
         self.codegen_static_item(def_id)
-    }
-
-    /// Add a global value to a list to be stored in the `llvm.used` variable, an array of ptr.
-    fn add_used_global(&self, global: &'ll Value) {
-        self.used_statics.borrow_mut().push(global);
-    }
-
-    /// Add a global value to a list to be stored in the `llvm.compiler.used` variable,
-    /// an array of ptr.
-    fn add_compiler_used_global(&self, global: &'ll Value) {
-        self.compiler_used_statics.borrow_mut().push(global);
     }
 }

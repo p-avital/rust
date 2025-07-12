@@ -97,13 +97,13 @@ pub enum BlockReason {
     /// Blocked on a mutex.
     Mutex,
     /// Blocked on a condition variable.
-    Condvar(CondvarId),
+    Condvar,
     /// Blocked on a reader-writer lock.
-    RwLock(RwLockId),
+    RwLock,
     /// Blocked on a Futex variable.
     Futex,
     /// Blocked on an InitOnce.
-    InitOnce(InitOnceId),
+    InitOnce,
     /// Blocked on epoll.
     Epoll,
     /// Blocked on eventfd.
@@ -218,34 +218,37 @@ impl<'tcx> Thread<'tcx> {
         }
     }
 
-    /// Return the top user-relevant frame, if there is one.
+    /// Return the top user-relevant frame, if there is one. `skip` indicates how many top frames
+    /// should be skipped.
     /// Note that the choice to return `None` here when there is no user-relevant frame is part of
     /// justifying the optimization that only pushes of user-relevant frames require updating the
     /// `top_user_relevant_frame` field.
-    fn compute_top_user_relevant_frame(&self) -> Option<usize> {
+    fn compute_top_user_relevant_frame(&self, skip: usize) -> Option<usize> {
         self.stack
             .iter()
             .enumerate()
             .rev()
+            .skip(skip)
             .find_map(|(idx, frame)| if frame.extra.is_user_relevant { Some(idx) } else { None })
     }
 
-    /// Re-compute the top user-relevant frame from scratch.
-    pub fn recompute_top_user_relevant_frame(&mut self) {
-        self.top_user_relevant_frame = self.compute_top_user_relevant_frame();
+    /// Re-compute the top user-relevant frame from scratch. `skip` indicates how many top frames
+    /// should be skipped.
+    pub fn recompute_top_user_relevant_frame(&mut self, skip: usize) {
+        self.top_user_relevant_frame = self.compute_top_user_relevant_frame(skip);
     }
 
     /// Set the top user-relevant frame to the given value. Must be equal to what
     /// `get_top_user_relevant_frame` would return!
     pub fn set_top_user_relevant_frame(&mut self, frame_idx: usize) {
-        debug_assert_eq!(Some(frame_idx), self.compute_top_user_relevant_frame());
+        debug_assert_eq!(Some(frame_idx), self.compute_top_user_relevant_frame(0));
         self.top_user_relevant_frame = Some(frame_idx);
     }
 
     /// Returns the topmost frame that is considered user-relevant, or the
     /// top of the stack if there is no such frame, or `None` if the stack is empty.
     pub fn top_user_relevant_frame(&self) -> Option<usize> {
-        debug_assert_eq!(self.top_user_relevant_frame, self.compute_top_user_relevant_frame());
+        debug_assert_eq!(self.top_user_relevant_frame, self.compute_top_user_relevant_frame(0));
         // This can be called upon creation of an allocation. We create allocations while setting up
         // parts of the Rust runtime when we do not have any stack frames yet, so we need to handle
         // empty stacks.
@@ -579,88 +582,6 @@ impl<'tcx> ThreadManager<'tcx> {
         interp_ok(())
     }
 
-    /// Mark that the active thread tries to join the thread with `joined_thread_id`.
-    fn join_thread(
-        &mut self,
-        joined_thread_id: ThreadId,
-        data_race_handler: &mut GlobalDataRaceHandler,
-    ) -> InterpResult<'tcx> {
-        if self.threads[joined_thread_id].join_status == ThreadJoinStatus::Detached {
-            // On Windows this corresponds to joining on a closed handle.
-            throw_ub_format!("trying to join a detached thread");
-        }
-
-        fn after_join<'tcx>(
-            threads: &mut ThreadManager<'_>,
-            joined_thread_id: ThreadId,
-            data_race_handler: &mut GlobalDataRaceHandler,
-        ) -> InterpResult<'tcx> {
-            match data_race_handler {
-                GlobalDataRaceHandler::None => {}
-                GlobalDataRaceHandler::Vclocks(data_race) =>
-                    data_race.thread_joined(threads, joined_thread_id),
-                GlobalDataRaceHandler::Genmc(genmc_ctx) =>
-                    genmc_ctx.handle_thread_join(threads.active_thread, joined_thread_id)?,
-            }
-            interp_ok(())
-        }
-
-        // Mark the joined thread as being joined so that we detect if other
-        // threads try to join it.
-        self.threads[joined_thread_id].join_status = ThreadJoinStatus::Joined;
-        if !self.threads[joined_thread_id].state.is_terminated() {
-            trace!(
-                "{:?} blocked on {:?} when trying to join",
-                self.active_thread, joined_thread_id
-            );
-            // The joined thread is still running, we need to wait for it.
-            // Unce we get unblocked, perform the appropriate synchronization.
-            self.block_thread(
-                BlockReason::Join(joined_thread_id),
-                None,
-                callback!(
-                    @capture<'tcx> {
-                        joined_thread_id: ThreadId,
-                    }
-                    |this, unblock: UnblockKind| {
-                        assert_eq!(unblock, UnblockKind::Ready);
-                        after_join(&mut this.machine.threads, joined_thread_id, &mut this.machine.data_race)
-                    }
-                ),
-            );
-        } else {
-            // The thread has already terminated - establish happens-before
-            after_join(self, joined_thread_id, data_race_handler)?;
-        }
-        interp_ok(())
-    }
-
-    /// Mark that the active thread tries to exclusively join the thread with `joined_thread_id`.
-    /// If the thread is already joined by another thread, it will throw UB
-    fn join_thread_exclusive(
-        &mut self,
-        joined_thread_id: ThreadId,
-        data_race_handler: &mut GlobalDataRaceHandler,
-    ) -> InterpResult<'tcx> {
-        if self.threads[joined_thread_id].join_status == ThreadJoinStatus::Joined {
-            throw_ub_format!("trying to join an already joined thread");
-        }
-
-        if joined_thread_id == self.active_thread {
-            throw_ub_format!("trying to join itself");
-        }
-
-        // Sanity check `join_status`.
-        assert!(
-            self.threads
-                .iter()
-                .all(|thread| { !thread.state.is_blocked_on(BlockReason::Join(joined_thread_id)) }),
-            "this thread already has threads waiting for its termination"
-        );
-
-        self.join_thread(joined_thread_id, data_race_handler)
-    }
-
     /// Set the name of the given thread.
     pub fn set_thread_name(&mut self, thread: ThreadId, new_thread_name: Vec<u8>) {
         self.threads[thread].thread_name = Some(new_thread_name);
@@ -894,12 +815,17 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             if tcx.is_foreign_item(def_id) {
                 throw_unsup_format!("foreign thread-local statics are not supported");
             }
+            let params = this.machine.get_default_alloc_params();
             let alloc = this.ctfe_query(|tcx| tcx.eval_static_initializer(def_id))?;
             // We make a full copy of this allocation.
             let mut alloc = alloc.inner().adjust_from_tcx(
                 &this.tcx,
                 |bytes, align| {
-                    interp_ok(MiriAllocBytes::from_bytes(std::borrow::Cow::Borrowed(bytes), align))
+                    interp_ok(MiriAllocBytes::from_bytes(
+                        std::borrow::Cow::Borrowed(bytes),
+                        align,
+                        params,
+                    ))
                 },
                 |ptr| this.global_root_pointer(ptr),
             )?;
@@ -968,7 +894,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             start_abi,
             &[func_arg],
             Some(&ret_place),
-            StackPopCleanup::Root { cleanup: true },
+            ReturnContinuation::Stop { cleanup: true },
         )?;
 
         // Restore the old active thread frame.
@@ -1106,20 +1032,102 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         this.machine.threads.detach_thread(thread_id, allow_terminated_joined)
     }
 
-    #[inline]
-    fn join_thread(&mut self, joined_thread_id: ThreadId) -> InterpResult<'tcx> {
+    /// Mark that the active thread tries to join the thread with `joined_thread_id`.
+    ///
+    /// When the join is successful (immediately, or as soon as the joined thread finishes), `success_retval` will be written to `return_dest`.
+    fn join_thread(
+        &mut self,
+        joined_thread_id: ThreadId,
+        success_retval: Scalar,
+        return_dest: &MPlaceTy<'tcx>,
+    ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        this.machine.threads.join_thread(joined_thread_id, &mut this.machine.data_race)?;
+        let thread_mgr = &mut this.machine.threads;
+        if thread_mgr.threads[joined_thread_id].join_status == ThreadJoinStatus::Detached {
+            // On Windows this corresponds to joining on a closed handle.
+            throw_ub_format!("trying to join a detached thread");
+        }
+
+        fn after_join<'tcx>(
+            this: &mut InterpCx<'tcx, MiriMachine<'tcx>>,
+            joined_thread_id: ThreadId,
+            success_retval: Scalar,
+            return_dest: &MPlaceTy<'tcx>,
+        ) -> InterpResult<'tcx> {
+            let threads = &this.machine.threads;
+            match &mut this.machine.data_race {
+                GlobalDataRaceHandler::None => {}
+                GlobalDataRaceHandler::Vclocks(data_race) =>
+                    data_race.thread_joined(threads, joined_thread_id),
+                GlobalDataRaceHandler::Genmc(genmc_ctx) =>
+                    genmc_ctx.handle_thread_join(threads.active_thread, joined_thread_id)?,
+            }
+            this.write_scalar(success_retval, return_dest)?;
+            interp_ok(())
+        }
+
+        // Mark the joined thread as being joined so that we detect if other
+        // threads try to join it.
+        thread_mgr.threads[joined_thread_id].join_status = ThreadJoinStatus::Joined;
+        if !thread_mgr.threads[joined_thread_id].state.is_terminated() {
+            trace!(
+                "{:?} blocked on {:?} when trying to join",
+                thread_mgr.active_thread, joined_thread_id
+            );
+            // The joined thread is still running, we need to wait for it.
+            // Once we get unblocked, perform the appropriate synchronization and write the return value.
+            let dest = return_dest.clone();
+            thread_mgr.block_thread(
+                BlockReason::Join(joined_thread_id),
+                None,
+                callback!(
+                    @capture<'tcx> {
+                        joined_thread_id: ThreadId,
+                        dest: MPlaceTy<'tcx>,
+                        success_retval: Scalar,
+                    }
+                    |this, unblock: UnblockKind| {
+                        assert_eq!(unblock, UnblockKind::Ready);
+                        after_join(this, joined_thread_id, success_retval, &dest)
+                    }
+                ),
+            );
+        } else {
+            // The thread has already terminated - establish happens-before and write the return value.
+            after_join(this, joined_thread_id, success_retval, return_dest)?;
+        }
         interp_ok(())
     }
 
-    #[inline]
-    fn join_thread_exclusive(&mut self, joined_thread_id: ThreadId) -> InterpResult<'tcx> {
+    /// Mark that the active thread tries to exclusively join the thread with `joined_thread_id`.
+    /// If the thread is already joined by another thread, it will throw UB.
+    ///
+    /// When the join is successful (immediately, or as soon as the joined thread finishes), `success_retval` will be written to `return_dest`.
+    fn join_thread_exclusive(
+        &mut self,
+        joined_thread_id: ThreadId,
+        success_retval: Scalar,
+        return_dest: &MPlaceTy<'tcx>,
+    ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        this.machine
-            .threads
-            .join_thread_exclusive(joined_thread_id, &mut this.machine.data_race)?;
-        interp_ok(())
+        let threads = &this.machine.threads.threads;
+        if threads[joined_thread_id].join_status == ThreadJoinStatus::Joined {
+            throw_ub_format!("trying to join an already joined thread");
+        }
+
+        if joined_thread_id == this.machine.threads.active_thread {
+            throw_ub_format!("trying to join itself");
+        }
+
+        // Sanity check `join_status`.
+        assert!(
+            threads
+                .iter()
+                .all(|thread| { !thread.state.is_blocked_on(BlockReason::Join(joined_thread_id)) }),
+            "this thread already has threads waiting for its termination"
+        );
+
+        this.join_thread(joined_thread_id, success_retval, return_dest)
     }
 
     #[inline]

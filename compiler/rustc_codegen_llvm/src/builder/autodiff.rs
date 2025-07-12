@@ -114,7 +114,7 @@ fn match_args_from_caller_to_enzyme<'ll>(
             let mul = unsafe {
                 llvm::LLVMBuildMul(
                     builder.llbuilder,
-                    cx.get_const_i64(elem_bytes_size),
+                    cx.get_const_int(cx.type_i64(), elem_bytes_size),
                     next_outer_arg,
                     UNNAMED,
                 )
@@ -306,7 +306,7 @@ fn generate_enzyme_call<'ll>(
     // add outer_fn name to ad_name to make it unique, in case users apply autodiff to multiple
     // functions. Unwrap will only panic, if LLVM gave us an invalid string.
     let name = llvm::get_value_name(outer_fn);
-    let outer_fn_name = std::str::from_utf8(name).unwrap();
+    let outer_fn_name = std::str::from_utf8(&name).unwrap();
     ad_name.push_str(outer_fn_name);
 
     // Let us assume the user wrote the following function square:
@@ -385,7 +385,7 @@ fn generate_enzyme_call<'ll>(
         if attrs.width > 1 {
             let enzyme_width = cx.create_metadata("enzyme_width".to_string()).unwrap();
             args.push(cx.get_metadata_value(enzyme_width));
-            args.push(cx.get_const_i64(attrs.width as u64));
+            args.push(cx.get_const_int(cx.type_i64(), attrs.width as u64));
         }
 
         let has_sret = has_sret(outer_fn);

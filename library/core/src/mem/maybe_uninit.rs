@@ -391,7 +391,7 @@ impl<T> MaybeUninit<T> {
     /// For your convenience, this also returns a mutable reference to the
     /// (now safely initialized) contents of `self`.
     ///
-    /// As the content is stored inside a `MaybeUninit`, the destructor is not
+    /// As the content is stored inside a `ManuallyDrop`, the destructor is not
     /// run for the inner data if the MaybeUninit leaves scope without a call to
     /// [`assume_init`], [`assume_init_drop`], or similar. Code that receives
     /// the mutable reference returned by this function needs to keep this in
@@ -616,7 +616,9 @@ impl<T> MaybeUninit<T> {
         // This also means that `self` must be a `value` variant.
         unsafe {
             intrinsics::assert_inhabited::<T>();
-            ManuallyDrop::into_inner(self.value)
+            // We do this via a raw ptr read instead of `ManuallyDrop::into_inner` so that there's
+            // no trace of `ManuallyDrop` in Miri's error messages here.
+            (&raw const self.value).cast::<T>().read()
         }
     }
 

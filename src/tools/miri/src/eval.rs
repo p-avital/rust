@@ -11,7 +11,7 @@ use rustc_abi::ExternAbi;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def::Namespace;
 use rustc_hir::def_id::DefId;
-use rustc_middle::ty::layout::{LayoutCx, LayoutOf};
+use rustc_middle::ty::layout::LayoutCx;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_session::config::EntryFnType;
 
@@ -148,9 +148,10 @@ pub struct MiriConfig {
     pub report_progress: Option<u32>,
     /// Whether Stacked Borrows and Tree Borrows retagging should recurse into fields of datatypes.
     pub retag_fields: RetagFields,
-    /// The location of a shared object file to load when calling external functions
-    /// FIXME! consider allowing users to specify paths to multiple files, or to a directory
-    pub native_lib: Option<PathBuf>,
+    /// The location of the shared object files to load when calling external functions
+    pub native_lib: Vec<PathBuf>,
+    /// Whether to enable the new native lib tracing system.
+    pub native_lib_enable_tracing: bool,
     /// Run a garbage collector for BorTags every N basic blocks.
     pub gc_interval: u32,
     /// The number of CPUs to be reported by miri.
@@ -167,6 +168,8 @@ pub struct MiriConfig {
     pub fixed_scheduling: bool,
     /// Always prefer the intrinsic fallback body over the native Miri implementation.
     pub force_intrinsic_fallback: bool,
+    /// Whether floating-point operations can behave non-deterministically.
+    pub float_nondet: bool,
 }
 
 impl Default for MiriConfig {
@@ -197,7 +200,8 @@ impl Default for MiriConfig {
             preemption_rate: 0.01, // 1%
             report_progress: None,
             retag_fields: RetagFields::Yes,
-            native_lib: None,
+            native_lib: vec![],
+            native_lib_enable_tracing: false,
             gc_interval: 10_000,
             num_cpus: 1,
             page_size: None,
@@ -206,6 +210,7 @@ impl Default for MiriConfig {
             address_reuse_cross_thread_rate: 0.1,
             fixed_scheduling: false,
             force_intrinsic_fallback: false,
+            float_nondet: true,
         }
     }
 }
@@ -278,16 +283,6 @@ impl<'tcx> MainThreadState<'tcx> {
                 // to be like a global `static`, so that all memory reached by it is considered to "not leak".
                 this.terminate_active_thread(TlsAllocAction::Leak)?;
 
-                // Machine cleanup. Only do this if all threads have terminated; threads that are still running
-                // might cause Stacked Borrows errors (https://github.com/rust-lang/miri/issues/2396).
-                if this.have_all_terminated() {
-                    // Even if all threads have terminated, we have to beware of data races since some threads
-                    // might not have joined the main thread (https://github.com/rust-lang/miri/issues/2020,
-                    // https://github.com/rust-lang/miri/issues/2508).
-                    this.allow_data_races_all_threads_done();
-                    EnvVars::cleanup(this).expect("error during env var cleanup");
-                }
-
                 // Stop interpreter loop.
                 throw_machine_stop!(TerminationInfo::Exit { code: exit_code, leak_check: true });
             }
@@ -354,14 +349,13 @@ pub fn create_ecx<'tcx>(
             argvs.push(arg_place.to_ref(&ecx));
         }
         // Make an array with all these pointers, in the Miri memory.
-        let argvs_layout = ecx.layout_of(Ty::new_array(
-            tcx,
-            Ty::new_imm_ptr(tcx, tcx.types.u8),
-            u64::try_from(argvs.len()).unwrap(),
-        ))?;
+        let u8_ptr_type = Ty::new_imm_ptr(tcx, tcx.types.u8);
+        let u8_ptr_ptr_type = Ty::new_imm_ptr(tcx, u8_ptr_type);
+        let argvs_layout =
+            ecx.layout_of(Ty::new_array(tcx, u8_ptr_type, u64::try_from(argvs.len()).unwrap()))?;
         let argvs_place = ecx.allocate(argvs_layout, MiriMemoryKind::Machine.into())?;
-        for (idx, arg) in argvs.into_iter().enumerate() {
-            let place = ecx.project_field(&argvs_place, idx)?;
+        for (arg, idx) in argvs.into_iter().zip(0..) {
+            let place = ecx.project_index(&argvs_place, idx)?;
             ecx.write_immediate(arg, &place)?;
         }
         ecx.mark_immutable(&argvs_place);
@@ -373,10 +367,8 @@ pub fn create_ecx<'tcx>(
             ecx.mark_immutable(&argc_place);
             ecx.machine.argc = Some(argc_place.ptr());
 
-            let argv_place = ecx.allocate(
-                ecx.layout_of(Ty::new_imm_ptr(tcx, tcx.types.unit))?,
-                MiriMemoryKind::Machine.into(),
-            )?;
+            let argv_place =
+                ecx.allocate(ecx.layout_of(u8_ptr_ptr_type)?, MiriMemoryKind::Machine.into())?;
             ecx.write_pointer(argvs_place.ptr(), &argv_place)?;
             ecx.mark_immutable(&argv_place);
             ecx.machine.argv = Some(argv_place.ptr());
@@ -392,13 +384,15 @@ pub fn create_ecx<'tcx>(
                 ecx.allocate(ecx.layout_of(cmd_type)?, MiriMemoryKind::Machine.into())?;
             ecx.machine.cmd_line = Some(cmd_place.ptr());
             // Store the UTF-16 string. We just allocated so we know the bounds are fine.
-            for (idx, &c) in cmd_utf16.iter().enumerate() {
-                let place = ecx.project_field(&cmd_place, idx)?;
+            for (&c, idx) in cmd_utf16.iter().zip(0..) {
+                let place = ecx.project_index(&cmd_place, idx)?;
                 ecx.write_scalar(Scalar::from_u16(c), &place)?;
             }
             ecx.mark_immutable(&cmd_place);
         }
-        ecx.mplace_to_ref(&argvs_place)?
+        let imm = argvs_place.to_ref(&ecx);
+        let layout = ecx.layout_of(u8_ptr_ptr_type)?;
+        ImmTy::from_immediate(imm, layout)
     };
 
     // Return place (in static memory so that it does not count as leak).
@@ -442,7 +436,7 @@ pub fn create_ecx<'tcx>(
                     ImmTy::from_uint(sigpipe, ecx.machine.layouts.u8),
                 ],
                 Some(&ret_place),
-                StackPopCleanup::Root { cleanup: true },
+                ReturnContinuation::Stop { cleanup: true },
             )?;
         }
         MiriEntryFnType::MiriStart => {
@@ -451,7 +445,7 @@ pub fn create_ecx<'tcx>(
                 ExternAbi::Rust,
                 &[argc, argv],
                 Some(&ret_place),
-                StackPopCleanup::Root { cleanup: true },
+                ReturnContinuation::Stop { cleanup: true },
             )?;
         }
     }

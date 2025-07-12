@@ -6,33 +6,36 @@
 //! to a new platform, and allows for an unprecedented level of control over how
 //! the compiler works.
 //!
-//! # Using custom targets
+//! # Using targets and target.json
 //!
-//! A target tuple, as passed via `rustc --target=TUPLE`, will first be
-//! compared against the list of built-in targets. This is to ease distributing
-//! rustc (no need for configuration files) and also to hold these built-in
-//! targets as immutable and sacred. If `TUPLE` is not one of the built-in
-//! targets, rustc will check if a file named `TUPLE` exists. If it does, it
-//! will be loaded as the target configuration. If the file does not exist,
-//! rustc will search each directory in the environment variable
-//! `RUST_TARGET_PATH` for a file named `TUPLE.json`. The first one found will
-//! be loaded. If no file is found in any of those directories, a fatal error
-//! will be given.
+//! Invoking "rustc --target=${TUPLE}" will result in rustc initiating the [`Target::search`] by
+//! - checking if "$TUPLE" is a complete path to a json (ending with ".json") and loading if so
+//! - checking builtin targets for "${TUPLE}"
+//! - checking directories in "${RUST_TARGET_PATH}" for "${TUPLE}.json"
+//! - checking for "${RUSTC_SYSROOT}/lib/rustlib/${TUPLE}/target.json"
 //!
-//! Projects defining their own targets should use
-//! `--target=path/to/my-awesome-platform.json` instead of adding to
-//! `RUST_TARGET_PATH`.
+//! Code will then be compiled using the first discovered target spec.
 //!
 //! # Defining a new target
 //!
-//! Targets are defined using [JSON](https://json.org/). The `Target` struct in
-//! this module defines the format the JSON file should take, though each
-//! underscore in the field names should be replaced with a hyphen (`-`) in the
-//! JSON file. Some fields are required in every target specification, such as
-//! `llvm-target`, `target-endian`, `target-pointer-width`, `data-layout`,
-//! `arch`, and `os`. In general, options passed to rustc with `-C` override
-//! the target's settings, though `target-feature` and `link-args` will *add*
-//! to the list specified by the target, rather than replace.
+//! Targets are defined using a struct which additionally has serialization to and from [JSON].
+//! The `Target` struct in this module loosely corresponds with the format the JSON takes.
+//! We usually try to make the fields equivalent but we have given up on a 1:1 correspondence
+//! between the JSON and the actual structure itself.
+//!
+//! Some fields are required in every target spec, and they should be embedded in Target directly.
+//! Optional keys are in TargetOptions, but Target derefs to it, for no practical difference.
+//! Most notable is the "data-layout" field which specifies Rust's notion of sizes and alignments
+//! for several key types, such as f64, pointers, and so on.
+//!
+//! At one point we felt `-C` options should override the target's settings, like in C compilers,
+//! but that was an essentially-unmarked route for making code incorrect and Rust unsound.
+//! Confronted with programmers who prefer a compiler with a good UX instead of a lethal weapon,
+//! we have almost-entirely recanted that notion, though we hope "target modifiers" will offer
+//! a way to have a decent UX yet still extend the necessary compiler controls, without
+//! requiring a new target spec for each and every single possible target micro-variant.
+//!
+//! [JSON]: https://json.org
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -43,7 +46,7 @@ use std::str::FromStr;
 use std::{fmt, io};
 
 use rustc_abi::{
-    Align, Endian, ExternAbi, Integer, Size, TargetDataLayout, TargetDataLayoutErrors,
+    Align, CanonAbi, Endian, ExternAbi, Integer, Size, TargetDataLayout, TargetDataLayoutErrors,
 };
 use rustc_data_structures::fx::{FxHashSet, FxIndexSet};
 use rustc_fs_util::try_canonicalize;
@@ -53,15 +56,16 @@ use rustc_span::{Symbol, kw, sym};
 use serde_json::Value;
 use tracing::debug;
 
-use crate::callconv::Conv;
 use crate::json::{Json, ToJson};
 use crate::spec::crt_objects::CrtObjects;
 
 pub mod crt_objects;
 
+mod abi_map;
 mod base;
 mod json;
 
+pub use abi_map::{AbiMap, AbiMapping};
 pub use base::apple;
 pub use base::avr::ef_avr_arch;
 
@@ -721,7 +725,7 @@ impl ToJson for LinkSelfContainedComponents {
 }
 
 bitflags::bitflags! {
-    /// The `-Z linker-features` components that can individually be enabled or disabled.
+    /// The `-C linker-features` components that can individually be enabled or disabled.
     ///
     /// They are feature flags intended to be a more flexible mechanism than linker flavors, and
     /// also to prevent a combinatorial explosion of flavors whenever a new linker feature is
@@ -752,11 +756,22 @@ bitflags::bitflags! {
 rustc_data_structures::external_bitflags_debug! { LinkerFeatures }
 
 impl LinkerFeatures {
-    /// Parses a single `-Z linker-features` well-known feature, not a set of flags.
+    /// Parses a single `-C linker-features` well-known feature, not a set of flags.
     pub fn from_str(s: &str) -> Option<LinkerFeatures> {
         Some(match s {
             "cc" => LinkerFeatures::CC,
             "lld" => LinkerFeatures::LLD,
+            _ => return None,
+        })
+    }
+
+    /// Return the linker feature name, as would be passed on the CLI.
+    ///
+    /// Returns `None` if the bitflags aren't a singular component (but a mix of multiple flags).
+    pub fn as_str(self) -> Option<&'static str> {
+        Some(match self {
+            LinkerFeatures::CC => "cc",
+            LinkerFeatures::LLD => "lld",
             _ => return None,
         })
     }
@@ -1696,6 +1711,12 @@ impl ToJson for BinaryFormat {
     }
 }
 
+impl ToJson for Align {
+    fn to_json(&self) -> Json {
+        self.bits().to_json()
+    }
+}
+
 macro_rules! supported_targets {
     ( $(($tuple:literal, $module:ident),)+ ) => {
         mod targets {
@@ -1980,6 +2001,8 @@ supported_targets! {
 
     ("sparc-unknown-none-elf", sparc_unknown_none_elf),
 
+    ("loongarch32-unknown-none", loongarch32_unknown_none),
+    ("loongarch32-unknown-none-softfloat", loongarch32_unknown_none_softfloat),
     ("loongarch64-unknown-none", loongarch64_unknown_none),
     ("loongarch64-unknown-none-softfloat", loongarch64_unknown_none_softfloat),
 
@@ -2186,7 +2209,10 @@ pub struct TargetMetadata {
 
 impl Target {
     pub fn parse_data_layout(&self) -> Result<TargetDataLayout, TargetDataLayoutErrors<'_>> {
-        let mut dl = TargetDataLayout::parse_from_llvm_datalayout_string(&self.data_layout)?;
+        let mut dl = TargetDataLayout::parse_from_llvm_datalayout_string(
+            &self.data_layout,
+            self.options.default_address_space,
+        )?;
 
         // Perform consistency checks against the Target information.
         if dl.endian != self.endian {
@@ -2197,25 +2223,18 @@ impl Target {
         }
 
         let target_pointer_width: u64 = self.pointer_width.into();
-        if dl.pointer_size.bits() != target_pointer_width {
+        let dl_pointer_size: u64 = dl.pointer_size().bits();
+        if dl_pointer_size != target_pointer_width {
             return Err(TargetDataLayoutErrors::InconsistentTargetPointerWidth {
-                pointer_size: dl.pointer_size.bits(),
+                pointer_size: dl_pointer_size,
                 target: self.pointer_width,
             });
         }
 
-        dl.c_enum_min_size = self
-            .c_enum_min_bits
-            .map_or_else(
-                || {
-                    self.c_int_width
-                        .parse()
-                        .map_err(|_| String::from("failed to parse c_int_width"))
-                },
-                Ok,
-            )
-            .and_then(|i| Integer::from_size(Size::from_bits(i)))
-            .map_err(|err| TargetDataLayoutErrors::InvalidBitsSize { err })?;
+        dl.c_enum_min_size = Integer::from_size(Size::from_bits(
+            self.c_enum_min_bits.unwrap_or(self.c_int_width as _),
+        ))
+        .map_err(|err| TargetDataLayoutErrors::InvalidBitsSize { err })?;
 
         Ok(dl)
     }
@@ -2230,22 +2249,6 @@ impl HasTargetSpec for Target {
     fn target_spec(&self) -> &Target {
         self
     }
-}
-
-/// Which C ABI to use for `wasm32-unknown-unknown`.
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub enum WasmCAbi {
-    /// Spec-compliant C ABI.
-    Spec,
-    /// Legacy ABI. Which is non-spec-compliant.
-    Legacy {
-        /// Indicates whether the `wasm_c_abi` lint should be emitted.
-        with_lint: bool,
-    },
-}
-
-pub trait HasWasmCAbiOpt {
-    fn wasm_c_abi_opt(&self) -> WasmCAbi;
 }
 
 /// x86 (32-bit) abi options.
@@ -2277,7 +2280,7 @@ pub struct TargetOptions {
     /// Used as the `target_endian` `cfg` variable. Defaults to little endian.
     pub endian: Endian,
     /// Width of c_int type. Defaults to "32".
-    pub c_int_width: StaticCow<str>,
+    pub c_int_width: u16,
     /// OS name to use for conditional compilation (`target_os`). Defaults to "none".
     /// "none" implies a bare metal target without `std` library.
     /// A couple of targets having `std` also use "unknown" as an `os` value,
@@ -2512,7 +2515,7 @@ pub struct TargetOptions {
     pub stack_probes: StackProbeType,
 
     /// The minimum alignment for global symbols.
-    pub min_global_align: Option<u64>,
+    pub min_global_align: Option<Align>,
 
     /// Default number of codegen units to use in debug mode
     pub default_codegen_units: Option<u64>,
@@ -2655,12 +2658,17 @@ pub struct TargetOptions {
     /// Default value is "main"
     pub entry_name: StaticCow<str>,
 
-    /// The ABI of entry function.
-    /// Default value is `Conv::C`, i.e. C call convention
-    pub entry_abi: Conv,
+    /// The ABI of the entry function.
+    /// Default value is `CanonAbi::C`
+    pub entry_abi: CanonAbi,
 
     /// Whether the target supports XRay instrumentation.
     pub supports_xray: bool,
+
+    /// The default address space for this target. When using LLVM as a backend, most targets simply
+    /// use LLVM's default address space (0). Some other targets, such as CHERI targets, use a
+    /// custom default address space (in this specific case, `200`).
+    pub default_address_space: rustc_abi::AddressSpace,
 
     /// Whether the targets supports -Z small-data-threshold
     small_data_threshold_support: SmallDataThresholdSupport,
@@ -2774,7 +2782,7 @@ impl Default for TargetOptions {
     fn default() -> TargetOptions {
         TargetOptions {
             endian: Endian::Little,
-            c_int_width: "32".into(),
+            c_int_width: 32,
             os: "none".into(),
             env: "".into(),
             abi: "".into(),
@@ -2888,8 +2896,9 @@ impl Default for TargetOptions {
             generate_arange_section: true,
             supports_stack_protector: true,
             entry_name: "main".into(),
-            entry_abi: Conv::C,
+            entry_abi: CanonAbi::C,
             supports_xray: false,
+            default_address_space: rustc_abi::AddressSpace::ZERO,
             small_data_threshold_support: SmallDataThresholdSupport::DefaultForArch,
         }
     }
@@ -2914,114 +2923,9 @@ impl DerefMut for Target {
 }
 
 impl Target {
-    /// Given a function ABI, turn it into the correct ABI for this target.
-    pub fn adjust_abi(&self, abi: ExternAbi, c_variadic: bool) -> ExternAbi {
-        use ExternAbi::*;
-        match abi {
-            // On Windows, `extern "system"` behaves like msvc's `__stdcall`.
-            // `__stdcall` only applies on x86 and on non-variadic functions:
-            // https://learn.microsoft.com/en-us/cpp/cpp/stdcall?view=msvc-170
-            System { unwind } => {
-                if self.is_like_windows && self.arch == "x86" && !c_variadic {
-                    Stdcall { unwind }
-                } else {
-                    C { unwind }
-                }
-            }
-
-            EfiApi => {
-                if self.arch == "arm" {
-                    Aapcs { unwind: false }
-                } else if self.arch == "x86_64" {
-                    Win64 { unwind: false }
-                } else {
-                    C { unwind: false }
-                }
-            }
-
-            // See commentary in `is_abi_supported`.
-            Stdcall { unwind } | Thiscall { unwind } | Fastcall { unwind } => {
-                if self.arch == "x86" { abi } else { C { unwind } }
-            }
-            Vectorcall { unwind } => {
-                if ["x86", "x86_64"].contains(&&*self.arch) {
-                    abi
-                } else {
-                    C { unwind }
-                }
-            }
-
-            // The Windows x64 calling convention we use for `extern "Rust"`
-            // <https://learn.microsoft.com/en-us/cpp/build/x64-software-conventions#register-volatility-and-preservation>
-            // expects the callee to save `xmm6` through `xmm15`, but `PreserveMost`
-            // (that we use by default for `extern "rust-cold"`) doesn't save any of those.
-            // So to avoid bloating callers, just use the Rust convention here.
-            RustCold if self.is_like_windows && self.arch == "x86_64" => Rust,
-
-            abi => abi,
-        }
-    }
-
     pub fn is_abi_supported(&self, abi: ExternAbi) -> bool {
-        use ExternAbi::*;
-        match abi {
-            Rust | C { .. } | System { .. } | RustCall | Unadjusted | Cdecl { .. } | RustCold => {
-                true
-            }
-            EfiApi => {
-                ["arm", "aarch64", "riscv32", "riscv64", "x86", "x86_64"].contains(&&self.arch[..])
-            }
-            X86Interrupt => ["x86", "x86_64"].contains(&&self.arch[..]),
-            Aapcs { .. } => "arm" == self.arch,
-            CCmseNonSecureCall | CCmseNonSecureEntry => {
-                ["thumbv8m.main-none-eabi", "thumbv8m.main-none-eabihf", "thumbv8m.base-none-eabi"]
-                    .contains(&&self.llvm_target[..])
-            }
-            Win64 { .. } | SysV64 { .. } => self.arch == "x86_64",
-            PtxKernel => self.arch == "nvptx64",
-            GpuKernel => ["amdgpu", "nvptx64"].contains(&&self.arch[..]),
-            Msp430Interrupt => self.arch == "msp430",
-            RiscvInterruptM | RiscvInterruptS => ["riscv32", "riscv64"].contains(&&self.arch[..]),
-            AvrInterrupt | AvrNonBlockingInterrupt => self.arch == "avr",
-            Thiscall { .. } => self.arch == "x86",
-            // On windows these fall-back to platform native calling convention (C) when the
-            // architecture is not supported.
-            //
-            // This is I believe a historical accident that has occurred as part of Microsoft
-            // striving to allow most of the code to "just" compile when support for 64-bit x86
-            // was added and then later again, when support for ARM architectures was added.
-            //
-            // This is well documented across MSDN. Support for this in Rust has been added in
-            // #54576. This makes much more sense in context of Microsoft's C++ than it does in
-            // Rust, but there isn't much leeway remaining here to change it back at the time this
-            // comment has been written.
-            //
-            // Following are the relevant excerpts from the MSDN documentation.
-            //
-            // > The __vectorcall calling convention is only supported in native code on x86 and
-            // x64 processors that include Streaming SIMD Extensions 2 (SSE2) and above.
-            // > ...
-            // > On ARM machines, __vectorcall is accepted and ignored by the compiler.
-            //
-            // -- https://docs.microsoft.com/en-us/cpp/cpp/vectorcall?view=msvc-160
-            //
-            // > On ARM and x64 processors, __stdcall is accepted and ignored by the compiler;
-            //
-            // -- https://docs.microsoft.com/en-us/cpp/cpp/stdcall?view=msvc-160
-            //
-            // > In most cases, keywords or compiler switches that specify an unsupported
-            // > convention on a particular platform are ignored, and the platform default
-            // > convention is used.
-            //
-            // -- https://docs.microsoft.com/en-us/cpp/cpp/argument-passing-and-naming-conventions
-            Stdcall { .. } | Fastcall { .. } | Vectorcall { .. } if self.is_like_windows => true,
-            // Outside of Windows we want to only support these calling conventions for the
-            // architectures for which these calling conventions are actually well defined.
-            Stdcall { .. } | Fastcall { .. } if self.arch == "x86" => true,
-            Vectorcall { .. } if ["x86", "x86_64"].contains(&&self.arch[..]) => true,
-            // Reject these calling conventions everywhere else.
-            Stdcall { .. } | Fastcall { .. } | Vectorcall { .. } => false,
-        }
+        let abi_map = AbiMap::from_target(self);
+        abi_map.canonize_abi(abi, false).is_mapped()
     }
 
     /// Minimum integer size in bits that this target can perform atomic
@@ -3606,6 +3510,7 @@ impl Target {
             "msp430" => (Architecture::Msp430, None),
             "hexagon" => (Architecture::Hexagon, None),
             "bpf" => (Architecture::Bpf, None),
+            "loongarch32" => (Architecture::LoongArch32, None),
             "loongarch64" => (Architecture::LoongArch64, None),
             "csky" => (Architecture::Csky, None),
             "arm64ec" => (Architecture::Aarch64, Some(object::SubArchitecture::Arm64EC)),

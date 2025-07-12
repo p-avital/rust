@@ -304,6 +304,7 @@ impl HasAttrs for Stmt {
 }
 
 /// A newtype around an AST node that implements the traits above if the node implements them.
+#[repr(transparent)]
 pub struct AstNodeWrapper<Wrapped, Tag> {
     pub wrapped: Wrapped,
     pub tag: PhantomData<Tag>,
@@ -312,6 +313,18 @@ pub struct AstNodeWrapper<Wrapped, Tag> {
 impl<Wrapped, Tag> AstNodeWrapper<Wrapped, Tag> {
     pub fn new(wrapped: Wrapped, _tag: Tag) -> AstNodeWrapper<Wrapped, Tag> {
         AstNodeWrapper { wrapped, tag: Default::default() }
+    }
+
+    pub fn from_mut(wrapped: &mut Wrapped, _tag: Tag) -> &mut AstNodeWrapper<Wrapped, Tag> {
+        // SAFETY: `AstNodeWrapper` is `repr(transparent)` w.r.t `Wrapped`
+        unsafe { &mut *<*mut Wrapped>::cast(wrapped) }
+    }
+}
+
+// FIXME: remove after `stmt_expr_attributes` is stabilized.
+impl<T, Tag> From<AstNodeWrapper<P<T>, Tag>> for AstNodeWrapper<T, Tag> {
+    fn from(value: AstNodeWrapper<P<T>, Tag>) -> Self {
+        AstNodeWrapper { wrapped: *value.wrapped, tag: value.tag }
     }
 }
 

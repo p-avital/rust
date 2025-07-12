@@ -1,6 +1,6 @@
 // Local js definitions:
 /* global addClass, getSettingValue, hasClass, updateLocalStorage */
-/* global onEachLazy, removeClass, getVar */
+/* global onEachLazy, removeClass, getVar, nonnull */
 
 "use strict";
 
@@ -1179,8 +1179,10 @@ function preLoadCss(cssUrl) {
 
     onEachLazy(document.querySelectorAll(".toggle > summary:not(.hideme)"), el => {
         // @ts-expect-error
+        // Clicking on the summary's contents should not collapse it,
+        // but links within should still fire.
         el.addEventListener("click", e => {
-            if (e.target.tagName !== "SUMMARY" && e.target.tagName !== "A") {
+            if (!e.target.matches("summary, a, a *")) {
                 e.preventDefault();
             }
         });
@@ -1717,7 +1719,7 @@ function preLoadCss(cssUrl) {
     // 300px, and the RUSTDOC_MOBILE_BREAKPOINT is 700px, so BODY_MIN must be
     // at most 400px. Otherwise, it would start out at the default size, then
     // grabbing the resize handle would suddenly cause it to jank to
-    // its contraint-generated maximum.
+    // its constraint-generated maximum.
     const RUSTDOC_MOBILE_BREAKPOINT = 700;
     const BODY_MIN = 400;
     // At half-way past the minimum size, vanish the sidebar entirely
@@ -2134,5 +2136,33 @@ function preLoadCss(cssUrl) {
     onEachLazy(document.querySelectorAll(".docblock .example-wrap"), elem => {
         elem.addEventListener("mouseover", addCopyButton);
         elem.addEventListener("click", showHideCodeExampleButtons);
+    });
+}());
+
+// This section is a bugfix for firefox: when copying text with `user-select: none`, it adds
+// extra backline characters.
+//
+// Rustdoc issue: Workaround for https://github.com/rust-lang/rust/issues/141464
+// Firefox issue: https://bugzilla.mozilla.org/show_bug.cgi?id=1273836
+(function() {
+    document.body.addEventListener("copy", event => {
+        let target = nonnull(event.target);
+        let isInsideCode = false;
+        while (target && target !== document.body) {
+            // @ts-expect-error
+            if (target.tagName === "CODE") {
+                isInsideCode = true;
+                break;
+            }
+            // @ts-expect-error
+            target = target.parentElement;
+        }
+        if (!isInsideCode) {
+            return;
+        }
+        const selection = document.getSelection();
+         // @ts-expect-error
+        nonnull(event.clipboardData).setData("text/plain", selection.toString());
+        event.preventDefault();
     });
 }());

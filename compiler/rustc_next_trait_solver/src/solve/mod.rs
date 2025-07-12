@@ -21,6 +21,7 @@ mod project_goals;
 mod search_graph;
 mod trait_goals;
 
+use derive_where::derive_where;
 use rustc_type_ir::inherent::*;
 pub use rustc_type_ir::solve::*;
 use rustc_type_ir::{self as ty, Interner, TypingMode};
@@ -190,6 +191,7 @@ where
         goal: Goal<I, (I::Const, I::Ty)>,
     ) -> QueryResult<I> {
         let (ct, ty) = goal.predicate;
+        let ct = self.structurally_normalize_const(goal.param_env, ct)?;
 
         let ct_ty = match ct.kind() {
             ty::ConstKind::Infer(_) => {
@@ -210,7 +212,7 @@ where
             ty::ConstKind::Bound(_, _) => panic!("escaping bound vars in {:?}", ct),
             ty::ConstKind::Value(cv) => cv.ty(),
             ty::ConstKind::Placeholder(placeholder) => {
-                self.cx().find_const_ty_from_env(goal.param_env, placeholder)
+                placeholder.find_const_ty_from_env(goal.param_env)
             }
         };
 
@@ -236,8 +238,8 @@ where
             return None;
         }
 
-        // FIXME(-Znext-solver): We should instead try to find a `Certainty::Yes` response with
-        // a subset of the constraints that all the other responses have.
+        // FIXME(-Znext-solver): Add support to merge region constraints in
+        // responses to deal with trait-system-refactor-initiative#27.
         let one = responses[0];
         if responses[1..].iter().all(|&resp| resp == one) {
             return Some(one);
@@ -354,7 +356,7 @@ where
 fn response_no_constraints_raw<I: Interner>(
     cx: I,
     max_universe: ty::UniverseIndex,
-    variables: I::CanonicalVars,
+    variables: I::CanonicalVarKinds,
     certainty: Certainty,
 ) -> CanonicalResponse<I> {
     ty::Canonical {
@@ -368,4 +370,22 @@ fn response_no_constraints_raw<I: Interner>(
             certainty,
         },
     }
+}
+
+/// The result of evaluating a goal.
+pub struct GoalEvaluation<I: Interner> {
+    pub certainty: Certainty,
+    pub has_changed: HasChanged,
+    /// If the [`Certainty`] was `Maybe`, then keep track of whether the goal has changed
+    /// before rerunning it.
+    pub stalled_on: Option<GoalStalledOn<I>>,
+}
+
+/// The conditions that must change for a goal to warrant
+#[derive_where(Clone, Debug; I: Interner)]
+pub struct GoalStalledOn<I: Interner> {
+    pub num_opaques: usize,
+    pub stalled_vars: Vec<I::GenericArg>,
+    /// The cause that will be returned on subsequent evaluations if this goal remains stalled.
+    pub stalled_cause: MaybeCause,
 }

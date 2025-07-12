@@ -9,7 +9,7 @@ use clippy_utils::visitors::{Descend, for_each_expr};
 use hir::HirId;
 use rustc_hir as hir;
 use rustc_hir::{Block, BlockCheckMode, ItemKind, Node, UnsafeSource};
-use rustc_lexer::{TokenKind, tokenize};
+use rustc_lexer::{FrontmatterAllowed, TokenKind, tokenize};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_session::impl_lint_pass;
 use rustc_span::{BytePos, Pos, RelativeBytePos, Span, SyntaxContext};
@@ -256,7 +256,10 @@ impl<'tcx> LateLintPass<'tcx> for UndocumentedUnsafeBlocks {
                             cx,
                             UNNECESSARY_SAFETY_COMMENT,
                             span,
-                            format!("{} has unnecessary safety comment", item.kind.descr()),
+                            format!(
+                                "{} has unnecessary safety comment",
+                                cx.tcx.def_descr(item.owner_id.to_def_id()),
+                            ),
                             |diag| {
                                 diag.span_help(help_span, "consider removing the safety comment");
                             },
@@ -274,7 +277,10 @@ impl<'tcx> LateLintPass<'tcx> for UndocumentedUnsafeBlocks {
                         cx,
                         UNNECESSARY_SAFETY_COMMENT,
                         span,
-                        format!("{} has unnecessary safety comment", item.kind.descr()),
+                        format!(
+                            "{} has unnecessary safety comment",
+                            cx.tcx.def_descr(item.owner_id.to_def_id()),
+                        ),
                         |diag| {
                             diag.span_help(help_span, "consider removing the safety comment");
                         },
@@ -606,32 +612,31 @@ fn span_from_macro_expansion_has_safety_comment(cx: &LateContext<'_>, span: Span
     let ctxt = span.ctxt();
     if ctxt == SyntaxContext::root() {
         HasSafetyComment::Maybe
-    } else {
-        // From a macro expansion. Get the text from the start of the macro declaration to start of the
-        // unsafe block.
-        //     macro_rules! foo { () => { stuff }; (x) => { unsafe { stuff } }; }
-        //     ^--------------------------------------------^
-        if let Ok(unsafe_line) = source_map.lookup_line(span.lo())
-            && let Ok(macro_line) = source_map.lookup_line(ctxt.outer_expn_data().def_site.lo())
-            && Arc::ptr_eq(&unsafe_line.sf, &macro_line.sf)
-            && let Some(src) = unsafe_line.sf.src.as_deref()
-        {
-            if macro_line.line < unsafe_line.line {
-                match text_has_safety_comment(
-                    src,
-                    &unsafe_line.sf.lines()[macro_line.line + 1..=unsafe_line.line],
-                    unsafe_line.sf.start_pos,
-                ) {
-                    Some(b) => HasSafetyComment::Yes(b),
-                    None => HasSafetyComment::No,
-                }
-            } else {
-                HasSafetyComment::No
+    }
+    // From a macro expansion. Get the text from the start of the macro declaration to start of the
+    // unsafe block.
+    //     macro_rules! foo { () => { stuff }; (x) => { unsafe { stuff } }; }
+    //     ^--------------------------------------------^
+    else if let Ok(unsafe_line) = source_map.lookup_line(span.lo())
+        && let Ok(macro_line) = source_map.lookup_line(ctxt.outer_expn_data().def_site.lo())
+        && Arc::ptr_eq(&unsafe_line.sf, &macro_line.sf)
+        && let Some(src) = unsafe_line.sf.src.as_deref()
+    {
+        if macro_line.line < unsafe_line.line {
+            match text_has_safety_comment(
+                src,
+                &unsafe_line.sf.lines()[macro_line.line + 1..=unsafe_line.line],
+                unsafe_line.sf.start_pos,
+            ) {
+                Some(b) => HasSafetyComment::Yes(b),
+                None => HasSafetyComment::No,
             }
         } else {
-            // Problem getting source text. Pretend a comment was found.
-            HasSafetyComment::Maybe
+            HasSafetyComment::No
         }
+    } else {
+        // Problem getting source text. Pretend a comment was found.
+        HasSafetyComment::Maybe
     }
 }
 
@@ -741,7 +746,7 @@ fn text_has_safety_comment(src: &str, line_starts: &[RelativeBytePos], start_pos
     loop {
         if line.starts_with("/*") {
             let src = &src[line_start..line_starts.last().unwrap().to_usize()];
-            let mut tokens = tokenize(src);
+            let mut tokens = tokenize(src, FrontmatterAllowed::No);
             return (src[..tokens.next().unwrap().len as usize]
                 .to_ascii_uppercase()
                 .contains("SAFETY:")
